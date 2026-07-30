@@ -476,23 +476,22 @@ def get_replay(game_id: str):
 
     try:
         steps = db.replay_steps(game_id)
+        result = []
+        for step in steps:
+            board, _ = position_string_to_board(step["position"])
+            result.append({
+                "move_number": step["move_number"],
+                "side": step["side"],
+                "notation": step["notation"],
+                "board": board_to_json(board),
+            })
     except Exception as e:
         # 常见原因：这局对局是用旧版记谱格式存的，现在的解析器读不懂了
         # （记谱格式在开发过程中调整过，早期存的数据可能跟当前版本不兼容）
         raise HTTPException(
             status_code=422,
-            detail=f"这局对局的棋谱回放失败，可能是用旧格式存储的历史数据: {e}",
+            detail=f"这局对局的棋谱回放失败，可能是用旧格式存储的历史数据: {type(e).__name__}: {e}",
         )
-
-    result = []
-    for step in steps:
-        board, _ = position_string_to_board(step["position"])
-        result.append({
-            "move_number": step["move_number"],
-            "side": step["side"],
-            "notation": step["notation"],
-            "board": board_to_json(board),
-        })
     return {"game_id": game_id, "steps": result}
 
 
