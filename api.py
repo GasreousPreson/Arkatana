@@ -474,7 +474,16 @@ def get_replay(game_id: str):
     if not db.game_exists(game_id):
         raise HTTPException(status_code=404, detail=f"找不到对局 ID: {game_id}")
 
-    steps = db.replay_steps(game_id)
+    try:
+        steps = db.replay_steps(game_id)
+    except Exception as e:
+        # 常见原因：这局对局是用旧版记谱格式存的，现在的解析器读不懂了
+        # （记谱格式在开发过程中调整过，早期存的数据可能跟当前版本不兼容）
+        raise HTTPException(
+            status_code=422,
+            detail=f"这局对局的棋谱回放失败，可能是用旧格式存储的历史数据: {e}",
+        )
+
     result = []
     for step in steps:
         board, _ = position_string_to_board(step["position"])
