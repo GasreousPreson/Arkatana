@@ -36,6 +36,7 @@ Arkatana（古战棋）— 数据持久化模块
 
 from __future__ import annotations
 import hashlib
+import os
 import secrets
 from datetime import datetime, timezone
 from typing import Optional
@@ -46,19 +47,34 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from game import Game
 from notation import format_game, board_to_position_string, parse_move_notation
 
-
 # ---------------------------------------------------------------------------
-# 数据库连接（默认使用项目目录下的 arkatana.db 文件）
+# 数据库连接
 # ---------------------------------------------------------------------------
+# 优先使用环境变量 DATABASE_URL（部署上线后指向 PostgreSQL，比如 Neon 提供的连接串）；
+# 本地开发没有设置这个环境变量时，自动退回本地 SQLite 文件，行为跟以前完全一样。
 
-DB_PATH = "arkatana.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+DB_PATH = os.environ.get("DATABASE_PATH", "arkatana.db")
 
 
-def _build_engine(db_path: str):
-    return create_engine(f"sqlite:///{db_path}", echo=False)
+def _build_engine(sqlite_path: str | None = None):
+    """
+    构建数据库引擎：
+    - 如果环境变量 DATABASE_URL 存在（生产环境接了 PostgreSQL），优先使用它。
+      注意 Render/Neon 给出的连接串常以 "postgres://" 开头，
+      但 SQLAlchemy 2.0 要求写成 "postgresql://"，这里做了自动兼容处理。
+    - 否则退回本地 SQLite 文件（sqlite_path 参数，主要供自检测试传入独立的临时文件，
+      不传则用默认的 DB_PATH）。
+    """
+    if DATABASE_URL:
+        url = DATABASE_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        return create_engine(url, echo=False)
+    return create_engine(f"sqlite:///{sqlite_path or DB_PATH}", echo=False)
 
 
-engine = _build_engine(DB_PATH)
+engine = _build_engine()
 SessionLocal = sessionmaker(bind=engine)
 
 
