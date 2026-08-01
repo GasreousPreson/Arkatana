@@ -1,6 +1,6 @@
 """
-api.py  (第5版：账号绑定对局 + WebSocket 实时同步)
-====================================================
+api.py  (第6版：接入时间控制 + 评分系统)
+==========================================
 运行方式（终端里，确保在项目文件夹下）：
 
     uvicorn api:app --reload
@@ -10,13 +10,21 @@ api.py  (第5版：账号绑定对局 + WebSocket 实时同步)
 设计说明：
     - 对局状态仍然优先保存在内存里的 GAMES 字典中（{game_id: Game 实例}），
       访问速度快；但每次创建/走棋/悔棋/认输之后都会调用 db.save_game()
-      同步落盘到 SQLite（arkatana.db）。
+      同步落盘到 SQLite/PostgreSQL。
     - 如果内存里找不到某个对局（比如服务器重启过），get_game_or_404()
-      会自动尝试从数据库读取并回放重建，而不是直接报"找不到"。
-    - 账号与对局的绑定：创建对局时，登录用户会自动认领黑方；
-      另一个登录用户可以调用 /games/{id}/join 认领白方。
+      会自动尝试从数据库读取并回放重建；同时会顺带做一次"惰性超时检测"——
+      每次有人跟这局对局交互，都会检查当前行棋方是不是已经超时。
+    - 账号与对局的绑定：创建对局时，登录用户可以指定执黑/执白/随机；
+      另一个登录用户可以调用 /games/{id}/join 认领剩下的一方。
       一旦某一方绑定了账号，走棋/悔棋/认输都会校验调用者身份。
       完全不登录也可以创建和游玩，此时是纯匿名对局，不做任何身份限制。
+    - 时间控制与棋钟：创建对局时可以指定 minutes_per_side/increment_seconds
+      （留空表示无时间限制）。棋钟什么时候开始走是有讲究的——纯匿名对局
+      创建即开始计时；绑定了账号、还留着空位等人加入的房间，
+      要等 /join 把最后一个空位填满才开始。
+    - rated（排位）对局：只能随机先后手，必须设置时间控制。
+      对局分出胜负后会自动触发评分结算（db.finalize_rated_game 内部
+      有防重复触发保护）。
     - WebSocket（/ws/games/{game_id}）：连接后立即收到当前状态，
       之后每次走棋/悔棋/认输/加入都会自动收到最新状态推送，
       不需要客户端手动刷新或轮询。
@@ -40,11 +48,12 @@ from board import parse_coord, coord_to_str
 from pieces import Side, Throne
 from game import Game, IllegalMoveError, GameOverError
 from notation import format_game, move_notation, position_string_to_board
-from rules import is_in_check
+from rules import is_in_check, GameResult
+from clock import TimeControl
 import db
 
 
-app = FastAPI(title="Arkatana API", version="0.5.0")
+app = FastAPI(title="Arkatana API", version="0.6.0")
 
 # 注册一个具名的安全方案，Swagger 页面右上角会出现一个"Authorize"锁头按钮，
 # 登录后把 token 粘贴进去点一次，之后所有接口请求会自动带上，不用每个接口都手填。
@@ -64,6 +73,9 @@ GAMES: dict[str, Game] = {}
 # 内存对局玩家绑定：{game_id: {"black": username|None, "white": username|None}}
 # 服务器重启后会从数据库里的 black_player/white_player 字段重新读取补全。
 GAME_PLAYERS: dict[str, dict] = {}
+
+# 内存对局的 rated 标记缓存：{game_id: bool}
+GAME_RATED: dict[str, bool] = {}
 
 # 内存登录令牌存储：{token: username}
 # 注意：这是临时方案，服务器重启后所有人都需要重新登录。
@@ -118,7 +130,10 @@ class ResignRequest(BaseModel):
 
 
 class CreateGameRequest(BaseModel):
-    side_preference: str = "random"   # "black" / "white" / "random"
+    side_preference: str = "random"     # "black" / "white" / "random"
+    rated: bool = False
+    minutes_per_side: int | None = None  # None 表示无时间限制（比如"线下对练"）
+    increment_seconds: int = 0
 
 
 class RegisterRequest(BaseModel):
@@ -152,6 +167,20 @@ def board_to_json(board) -> dict:
 def game_state(game_id: str, game: Game) -> dict:
     """组装一局对局当前状态的完整 JSON 响应"""
     players = get_players_cached(game_id)
+    clock = game.clock
+
+    if clock.is_unlimited:
+        time_info = {"time_control": None, "black_time": None, "white_time": None}
+    else:
+        time_info = {
+            "time_control": {
+                "minutes_per_side": clock.time_control.minutes_per_side,
+                "increment_seconds": clock.time_control.increment_seconds,
+            },
+            "black_time": clock.time_left("black"),
+            "white_time": clock.time_left("white"),
+        }
+
     return {
         "game_id": game_id,
         "current_side": game.current_side.value,
@@ -160,21 +189,30 @@ def game_state(game_id: str, game: Game) -> dict:
         "board": board_to_json(game.board),
         "black_player": players["black"],
         "white_player": players["white"],
+        "rated": GAME_RATED.get(game_id, False),
+        "clock_started": game.clock.active_side is not None,
+        **time_info,
     }
 
 
 def get_game_or_404(game_id: str) -> Game:
     game = GAMES.get(game_id)
-    if game is not None:
-        return game
+    if game is None:
+        # 内存里没有（比如服务器刚重启过），尝试从数据库读取重建
+        restored = db.load_game(game_id)
+        if restored is None:
+            raise HTTPException(status_code=404, detail=f"找不到对局 ID: {game_id}")
+        GAMES[game_id] = restored
+        GAME_RATED[game_id] = db.is_rated(game_id)
+        game = restored
 
-    # 内存里没有（比如服务器刚重启过），尝试从数据库读取重建
-    restored = db.load_game(game_id)
-    if restored is None:
-        raise HTTPException(status_code=404, detail=f"找不到对局 ID: {game_id}")
+    # 惰性超时检测：每次有人跟这局对局交互（不只是走棋），
+    # 顺带看一眼当前行棋方是不是已经超时，超时就直接结束对局。
+    if game.check_timeout():
+        persist(game_id, game)
+        maybe_finalize_rating(game_id, game)
 
-    GAMES[game_id] = restored
-    return restored
+    return game
 
 
 def persist(
@@ -182,9 +220,40 @@ def persist(
     game: Game,
     black_player: str | None = None,
     white_player: str | None = None,
+    rated: bool | None = None,
 ) -> None:
     """把当前对局状态存入数据库（每次影响状态的操作后都应调用）"""
-    db.save_game(game_id, game, black_player=black_player, white_player=white_player)
+    db.save_game(
+        game_id, game,
+        black_player=black_player, white_player=white_player, rated=rated,
+    )
+
+
+def maybe_finalize_rating(game_id: str, game: Game) -> None:
+    """
+    对局刚结束时调用：如果是 rated 对局，尝试触发评分结算。
+    db.finalize_rated_game 内部已经做好了各种前提条件检查
+    （是否rated、双方是否都注册、是否有时间控制、是否已经结算过），
+    这里只需要负责"游戏一结束就调用一下"，不需要重复判断。
+    """
+    if game.result == GameResult.ONGOING:
+        return
+    winner = "black" if game.result == GameResult.BLACK_WINS else "white"
+    db.finalize_rated_game(game_id, winner)
+
+
+def start_game_if_needed(game: Game) -> bool:
+    """
+    幂等地"正式开始"一局对局：如果棋钟还没走过（active_side 为 None），
+    就调用 start_clocks() 让它从现在开始计时；已经开始过了则什么都不做。
+    返回是否真的触发了开始（供调用方决定要不要落盘）。
+    """
+    if game.clock.is_unlimited:
+        return False  # 无时间限制的对局没有"开始计时"这回事
+    if game.clock.active_side is not None:
+        return False  # 已经开始过了
+    game.start_clocks()
+    return True
 
 
 def get_current_user(x_auth_token: str | None) -> str | None:
@@ -279,6 +348,13 @@ def read_current_user(x_auth_token: str = Security(auth_scheme)):
     return {"username": username}
 
 
+@app.get("/users/{username}/rating")
+def get_user_rating(username: str):
+    """查询某个用户的当前评分（公开信息，不需要登录），用户不存在则返回默认初始评分"""
+    rating, games_played = db.get_rating(username)
+    return {"username": username, "rating": rating, "games_played": games_played}
+
+
 # ---------------------------------------------------------------------------
 # 对局管理接口
 # ---------------------------------------------------------------------------
@@ -292,16 +368,41 @@ async def create_game(body: CreateGameRequest | None = None, x_auth_token: str =
       - "white"：创建者执白（后手）
       - "random"（默认）：随机决定创建者执哪一方
     未指定或不登录时，等同于纯匿名对局，双方都不绑定账号，也不会出现在大厅里。
-    """
-    game_id = uuid.uuid4().hex[:8]
-    GAMES[game_id] = Game()
 
+    rated（排位）对局只能随机先后手，不能指定执黑/执白；
+    而且 rated 对局必须设置时间控制（不能是无时间限制的"线下对练"模式）。
+
+    时间控制：minutes_per_side 留空表示无时间限制；否则两个数值都必须落在
+    约定好的离散档位上（TimeControl 内部会自动校验，不合法会返回 400）。
+
+    棋钟什么时候开始走：不管匿名还是账号对局，创建的这一刻都**不会**开始计时——
+    对局会先"晾在大厅里"等人进来，真正开始的时机由 /games/{id}/start 或
+    /games/{id}/join（账号对局凑齐两人时）触发，避免创建者一个人干等的时候
+    自己的棋钟却在空转。
+    """
     creator = get_current_user(x_auth_token)
+    preference = (body.side_preference if body else "random").strip().lower()
+    rated = bool(body.rated) if body else False
+    minutes_per_side = body.minutes_per_side if body else None
+    increment_seconds = (body.increment_seconds if body else 0) or 0
+
+    if rated and preference != "random":
+        raise HTTPException(status_code=400, detail="rated 对局只能随机先后手，不能指定执黑/执白")
+    if rated and minutes_per_side is None:
+        raise HTTPException(status_code=400, detail="rated 对局必须设置时间控制")
+
+    try:
+        time_control = TimeControl(minutes_per_side, increment_seconds) if minutes_per_side is not None else None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    game_id = uuid.uuid4().hex[:8]
+    GAMES[game_id] = Game(time_control=time_control)
+
     black_slot: str | None = None
     white_slot: str | None = None
 
     if creator is not None:
-        preference = (body.side_preference if body else "random").strip().lower()
         if preference == "black":
             black_slot = creator
         elif preference == "white":
@@ -313,7 +414,9 @@ async def create_game(body: CreateGameRequest | None = None, x_auth_token: str =
                 white_slot = creator
 
     GAME_PLAYERS[game_id] = {"black": black_slot, "white": white_slot}
-    persist(game_id, GAMES[game_id], black_player=black_slot, white_player=white_slot)
+    GAME_RATED[game_id] = rated
+
+    persist(game_id, GAMES[game_id], black_player=black_slot, white_player=white_slot, rated=rated)
 
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
@@ -326,7 +429,7 @@ async def join_game(game_id: str, x_auth_token: str = Security(auth_scheme)):
     登录用户加入一局对局，认领还没人认领的那一方。
     如果两方都已经有人认领，返回错误；如果自己已经在这局里了，也会提示。
     """
-    get_game_or_404(game_id)  # 确保对局存在（顺带把内存缓存补全）
+    game = get_game_or_404(game_id)  # 确保对局存在（顺带把内存缓存补全）
     username = require_login(x_auth_token)
     players = get_players_cached(game_id)
 
@@ -340,10 +443,44 @@ async def join_game(game_id: str, x_auth_token: str = Security(auth_scheme)):
     else:
         raise HTTPException(status_code=409, detail="这局对局的黑白双方都已经有人认领了")
 
+    # 刚好把最后一个空位填满：对局正式凑齐两个人，开始计时
+    if players["black"] is not None and players["white"] is not None:
+        start_game_if_needed(game)
+
     persist(game_id, GAMES[game_id], black_player=players["black"], white_player=players["white"])
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
     return state
+
+
+@app.post("/games/{game_id}/start")
+async def start_game(game_id: str):
+    """
+    正式开始一局对局（棋钟从此刻开始走）。这是"匿名对局"用的入口——
+    因为匿名玩家没有账号，没法走 /join 那套"认领身份"的流程，
+    所以只要是第二个真正打算下棋的人点了"进入对局"，前端就会调用这个接口。
+    如果棋钟已经在走了（比如已经有人触发过），这个接口不会做任何事，
+    可以放心重复调用。
+    """
+    game = get_game_or_404(game_id)
+    started_now = start_game_if_needed(game)
+    if started_now:
+        persist(game_id, game)
+    state = game_state(game_id, game)
+    await manager.broadcast(game_id, state)
+    return state
+
+
+@app.get("/games/mine")
+def list_my_games(limit: int = 20, x_auth_token: str = Security(auth_scheme)):
+    """
+    列出当前登录用户自己参与过的对局（网页首页"Game History"用这个）。
+    需要登录；匿名对局或别人的对局不会出现在这里。
+    注意：这个路由必须写在 /games/{game_id} 之前，否则 FastAPI 会把
+    "mine" 当成 game_id 处理，永远匹配不到这个接口。
+    """
+    username = require_login(x_auth_token)
+    return {"games": db.list_user_games(username, limit=limit)}
 
 
 @app.get("/games/{game_id}")
@@ -373,6 +510,7 @@ def get_legal_moves(game_id: str, coord: str):
 async def make_move(game_id: str, move: MoveRequest, x_auth_token: str = Security(auth_scheme)):
     """执行一步棋。如果当前轮到走棋的这一方已经绑定了账号，必须以该账号登录才能提交这步棋。"""
     game = get_game_or_404(game_id)
+    start_game_if_needed(game)  # 兜底：万一前端没调用 /start 就直接走棋了，这里保证棋钟正确开始
 
     players = get_players_cached(game_id)
     mover_slot = players[game.current_side.value]
@@ -402,6 +540,7 @@ async def make_move(game_id: str, move: MoveRequest, x_auth_token: str = Securit
     response = game_state(game_id, game)
     response["last_move"] = move_notation(record)
     persist(game_id, game)
+    maybe_finalize_rating(game_id, game)
     await manager.broadcast(game_id, response)
     return response
 
@@ -441,6 +580,7 @@ async def resign(game_id: str, body: ResignRequest, x_auth_token: str = Security
     side = Side.BLACK if side_key == "black" else Side.WHITE
     game.resign(side)
     persist(game_id, game)
+    maybe_finalize_rating(game_id, game)
     state = game_state(game_id, game)
     await manager.broadcast(game_id, state)
     return state
@@ -454,7 +594,7 @@ def get_lobby(limit: int = 20):
 
 @app.get("/games")
 def list_games(limit: int = 20):
-    """列出最近更新过的对局摘要（供以后的对局历史页面使用）"""
+    """列出最近更新过的对局摘要（内部/管理用途，不是网页首页"Game History"用的那个）"""
     return {"games": db.list_recent_games(limit=limit)}
 
 

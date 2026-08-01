@@ -1,0 +1,1035 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>古戰棋 Arkatana</title>
+<style>
+  :root {
+    --ink: #1b1b1e;
+    --parchment-light: #ede3c8;
+    --parchment-dark: #cbb98d;
+    --cinnabar: #a6362b;   /* 黑方（先手）标记色 */
+    --jade: #3f6656;       /* 白方（后手）标记色 */
+    --gold: #b8944b;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--ink);
+    color: var(--parchment-light);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 48px;
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 18px;
+  }
+
+  header h1 {
+    font-family: "SimSun", "Songti SC", Georgia, serif;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    font-size: 28px;
+    margin: 0 0 4px;
+    color: var(--parchment-light);
+  }
+
+  header .subtitle {
+    font-size: 12px;
+    letter-spacing: 0.2em;
+    color: var(--gold);
+    text-transform: uppercase;
+  }
+
+  #status-bar {
+    margin-top: 10px;
+    font-size: 14px;
+    display: flex;
+    gap: 18px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .status-chip {
+    padding: 4px 12px;
+    border: 1px solid var(--gold);
+    border-radius: 3px;
+    background: rgba(184, 148, 75, 0.08);
+  }
+
+  .side-tag { display: inline-flex; align-items: center; gap: 6px; }
+
+  #result-chip {
+    font-weight: 700;
+    transition: font-size 0.15s ease;
+  }
+  #result-chip.has-result {
+    font-size: 22px;
+    padding: 8px 20px;
+    background: rgba(184, 148, 75, 0.18);
+    border-width: 2px;
+  }
+  .side-dot {
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+  }
+  .side-dot.black { background: var(--cinnabar); }
+  .side-dot.white { background: var(--jade); }
+
+  main {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  #board-wrap {
+    position: relative;
+    max-width: 92vw;
+  }
+
+  canvas#board {
+    background: var(--parchment-light);
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px var(--gold), 0 12px 30px rgba(0,0,0,0.5);
+    max-width: 100%;
+    height: auto;
+    cursor: pointer;
+  }
+
+  aside.panel {
+    width: 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .card {
+    border: 1px solid var(--gold);
+    background: rgba(184, 148, 75, 0.06);
+    border-radius: 3px;
+    padding: 12px 14px;
+  }
+
+  .card h2 {
+    font-size: 13px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin: 0 0 10px;
+  }
+
+  input[type="text"], input[type="password"] {
+    width: 100%;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    font-size: 14px;
+    background: var(--parchment-light);
+    color: var(--ink);
+    border: 1px solid var(--gold);
+    border-radius: 3px;
+    font-family: inherit;
+  }
+
+  .auth-row {
+    display: flex;
+    gap: 8px;
+  }
+  .auth-row button { margin-bottom: 0; }
+
+  .join-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .join-row input { margin-bottom: 0; flex: 1; }
+  .join-row button { width: auto; margin-bottom: 0; white-space: nowrap; }
+
+  .side-pref-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-size: 13px;
+  }
+  .side-pref-row label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+  }
+  .side-pref-row input[type="radio"] {
+    width: auto;
+    margin: 0;
+  }
+
+  #lobby-list, #game-list {
+    list-style: none;
+    margin: 10px 0 0;
+    padding: 0;
+    max-height: 220px;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+  #lobby-list li.lobby-row, #game-list li.lobby-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(184, 148, 75, 0.25);
+  }
+  #lobby-list li.lobby-row:last-child, #game-list li.lobby-row:last-child { border-bottom: none; }
+  #lobby-list li.lobby-row button, #game-list li.lobby-row button {
+    width: auto;
+    margin-bottom: 0;
+    padding: 4px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  #lobby-list li.lobby-empty, #game-list li.lobby-empty {
+    opacity: 0.7;
+    padding: 6px 0;
+  }
+
+  #auth-status {
+    font-size: 13px;
+    margin-bottom: 10px;
+    color: var(--parchment-light);
+    opacity: 0.9;
+  }
+  #auth-status .username {
+    color: var(--gold);
+    font-weight: 700;
+  }
+
+  button {
+    width: 100%;
+    padding: 9px 10px;
+    margin-bottom: 8px;
+    font-size: 14px;
+    background: var(--parchment-light);
+    color: var(--ink);
+    border: 1px solid var(--gold);
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:last-child { margin-bottom: 0; }
+  button:hover { background: var(--gold); }
+  button:focus-visible {
+    outline: 2px solid var(--jade);
+    outline-offset: 2px;
+  }
+
+  #history-log {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 260px;
+    overflow-y: auto;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  #history-log li { color: var(--parchment-light); opacity: 0.9; }
+  #history-log li span.num { color: var(--gold); margin-right: 6px; }
+
+  #message-line {
+    font-size: 18px;
+    font-weight: 600;
+    min-height: 24px;
+    color: var(--gold);
+    margin-top: 10px;
+    text-align: center;
+  }
+
+  .game-info {
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  .game-info .row {
+    display: flex;
+    justify-content: space-between;
+  }
+  .clock {
+    font-family: Consolas, "Courier New", monospace;
+    font-weight: 700;
+    font-size: 15px;
+  }
+  .clock.low { color: var(--cinnabar); }
+
+  #replay-bar {
+    display: none;
+    margin-top: 10px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  #replay-bar button { width: auto; margin-bottom: 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><a href="index.html" style="color:inherit; text-decoration:none;">古 戰 棋 &nbsp; ARKATANA</a></h1>
+  <div class="subtitle"><a href="index.html" style="color:var(--gold); text-decoration:none;">← 返回主页</a></div>
+  <div id="status-bar">
+    <span class="status-chip side-tag"><span class="side-dot black"></span>黑方（先手）</span>
+    <span class="status-chip side-tag"><span class="side-dot white"></span>白方（后手）</span>
+    <span class="status-chip" id="turn-chip">加载中…</span>
+    <span class="status-chip" id="result-chip"></span>
+    <span class="status-chip" id="game-id-chip">对局: -</span>
+  </div>
+</header>
+
+<main>
+  <div id="board-wrap">
+    <canvas id="board" width="696" height="752"></canvas>
+  </div>
+
+  <aside class="panel">
+    <div class="card">
+      <h2>账号</h2>
+      <div id="auth-status">未登录（可以匿名对局）</div>
+      <input type="text" id="auth-username" placeholder="用户名" autocomplete="username">
+      <input type="password" id="auth-password" placeholder="密码" autocomplete="current-password">
+      <div class="auth-row">
+        <button id="btn-login">登录</button>
+        <button id="btn-register">注册</button>
+      </div>
+      <button id="btn-logout" style="display:none; margin-top:8px;">登出</button>
+    </div>
+    <div class="card">
+      <h2>对局信息</h2>
+      <div id="game-info" class="game-info"></div>
+      <button id="btn-start-game" style="display:none; margin-top:8px;">▶ 进入并开始对局</button>
+    </div>
+    <div class="card">
+      <h2>对局控制</h2>
+      <button id="btn-undo">悔棋</button>
+      <button id="btn-resign">当前方认输</button>
+    </div>
+    <div class="card">
+      <h2>走子记录</h2>
+      <ul id="history-log"></ul>
+    </div>
+  </aside>
+</main>
+
+<div id="message-line"></div>
+<div id="replay-bar">
+  <button id="btn-replay-prev">◀ 上一步</button>
+  <span id="replay-position-label">- / -</span>
+  <button id="btn-replay-next">下一步 ▶</button>
+  <button id="btn-replay-exit">退出复盘</button>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // -------------------------------------------------------------------
+  // 棋盘几何常量（需与 board.py 的坐标系统保持一致：a~k / 1~12）
+  // -------------------------------------------------------------------
+  const COLS = "abcdefghijk";
+  const MIN_ROW = 1;
+  const MAX_ROW = 12;
+  const CELL = 56;
+  const MARGIN = 40;
+
+  const canvas = document.getElementById("board");
+  const ctx = canvas.getContext("2d");
+
+  const COLORS = {
+    ink: "#1b1b1e",
+    parchLight: "#ede3c8",
+    parchDark: "#cbb98d",
+    cinnabar: "#a6362b",
+    jade: "#3f6656",
+    gold: "#b8944b",
+  };
+
+  // -------------------------------------------------------------------
+  // 状态
+  // -------------------------------------------------------------------
+  let gameId = null;
+  let boardState = {};      // { "d5": {piece, symbol, side, promoted}, ... }
+  let currentSide = "black";
+  let gameResult = "ongoing";
+  let selected = null;      // 当前选中的坐标字符串，例如 "d5"
+  let legalDestinations = []; // 选中棋子的合法目的地坐标字符串数组
+  let historyEntries = [];  // 记谱字符串数组
+  let boardFlipped = false; // 当前登录用户是这局的白方时为 true，整个棋盘转180度显示
+
+  // 复盘相关状态
+  let replayMode = false;
+  let replaySteps = [];
+  let replayIndex = -1;
+
+  // 登录状态：token 存在 localStorage 里，刷新页面不会掉登录
+  let authToken = localStorage.getItem("arkatana_token") || null;
+  let authUsername = localStorage.getItem("arkatana_username") || null;
+
+  const authStatusEl = document.getElementById("auth-status");
+  const authUsernameInput = document.getElementById("auth-username");
+  const authPasswordInput = document.getElementById("auth-password");
+  const btnLogin = document.getElementById("btn-login");
+  const btnRegister = document.getElementById("btn-register");
+  const btnLogout = document.getElementById("btn-logout");
+
+  const statusEl = document.getElementById("turn-chip");
+  const resultEl = document.getElementById("result-chip");
+  const gameIdChip = document.getElementById("game-id-chip");
+  const messageEl = document.getElementById("message-line");
+  const historyEl = document.getElementById("history-log");
+  const gameInfoEl = document.getElementById("game-info");
+
+  // -------------------------------------------------------------------
+  // 坐标 <-> 像素 转换
+  // -------------------------------------------------------------------
+  function colIndex(letter) { return COLS.indexOf(letter); }
+
+  function squareTopLeft(col, row) {
+    const displayCol = boardFlipped ? (COLS.length - 1 - col) : col;
+    const displayRowIndex = boardFlipped ? (row - MIN_ROW) : (MAX_ROW - row);
+    const x = MARGIN + displayCol * CELL;
+    const y = MARGIN + displayRowIndex * CELL;
+    return [x, y];
+  }
+
+  function pixelToSquare(px, py) {
+    const displayCol = Math.floor((px - MARGIN) / CELL);
+    const displayRowIndex = Math.floor((py - MARGIN) / CELL);
+    const col = boardFlipped ? (COLS.length - 1 - displayCol) : displayCol;
+    const row = boardFlipped ? (displayRowIndex + MIN_ROW) : (MAX_ROW - displayRowIndex);
+    if (col < 0 || col >= COLS.length || row < MIN_ROW || row > MAX_ROW) return null;
+    return COLS[col] + row;
+  }
+
+  // -------------------------------------------------------------------
+  // 绘制
+  // -------------------------------------------------------------------
+  function drawBoard() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 棋盘格子（浅/深宣纸色交替，便于辨认网格）
+    for (let row = MIN_ROW; row <= MAX_ROW; row++) {
+      for (let c = 0; c < COLS.length; c++) {
+        const [x, y] = squareTopLeft(c, row);
+        const isDark = (c + row) % 2 === 0;
+        ctx.fillStyle = isDark ? COLORS.parchDark : COLORS.parchLight;
+        ctx.fillRect(x, y, CELL, CELL);
+      }
+    }
+
+    // 网格线
+    ctx.strokeStyle = "rgba(27,27,30,0.25)";
+    ctx.lineWidth = 1;
+    for (let c = 0; c <= COLS.length; c++) {
+      const x = MARGIN + c * CELL;
+      ctx.beginPath();
+      ctx.moveTo(x, MARGIN);
+      ctx.lineTo(x, MARGIN + (MAX_ROW - MIN_ROW + 1) * CELL);
+      ctx.stroke();
+    }
+    for (let r = 0; r <= (MAX_ROW - MIN_ROW + 1); r++) {
+      const y = MARGIN + r * CELL;
+      ctx.beginPath();
+      ctx.moveTo(MARGIN, y);
+      ctx.lineTo(MARGIN + COLS.length * CELL, y);
+      ctx.stroke();
+    }
+
+    // 坐标标签
+    ctx.fillStyle = COLORS.ink;
+    ctx.font = "13px Consolas, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let c = 0; c < COLS.length; c++) {
+      const displayCol = boardFlipped ? (COLS.length - 1 - c) : c;
+      const x = MARGIN + displayCol * CELL + CELL / 2;
+      ctx.fillText(COLS[c], x, MARGIN + (MAX_ROW - MIN_ROW + 1) * CELL + 18);
+    }
+    ctx.textAlign = "right";
+    for (let row = MIN_ROW; row <= MAX_ROW; row++) {
+      const [, y] = squareTopLeft(0, row);
+      ctx.fillText(String(row), MARGIN - 10, y + CELL / 2);
+    }
+
+    // 选中格 & 合法目的地高亮
+    if (selected) {
+      highlightSquare(selected, COLORS.gold, 3);
+    }
+    legalDestinations.forEach((sq) => {
+      const occupied = !!boardState[sq];
+      drawMoveHint(sq, occupied);
+    });
+
+    // 四角战旗式装饰线（signature 元素）
+    drawCornerBrackets();
+
+    // 棋子
+    Object.entries(boardState).forEach(([sq, info]) => {
+      drawPiece(sq, info);
+    });
+  }
+
+  function squareToPixelCenter(sq) {
+    const col = colIndex(sq[0]);
+    const row = parseInt(sq.slice(1), 10);
+    const [x, y] = squareTopLeft(col, row);
+    return [x + CELL / 2, y + CELL / 2];
+  }
+
+  function highlightSquare(sq, color, width) {
+    const col = colIndex(sq[0]);
+    const row = parseInt(sq.slice(1), 10);
+    const [x, y] = squareTopLeft(col, row);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.strokeRect(x + width / 2, y + width / 2, CELL - width, CELL - width);
+  }
+
+  function drawMoveHint(sq, occupied) {
+    const [cx, cy] = squareToPixelCenter(sq);
+    if (occupied) {
+      ctx.strokeStyle = COLORS.gold;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, CELL / 2 - 4, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = COLORS.gold;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawPiece(sq, info) {
+    const [cx, cy] = squareToPixelCenter(sq);
+    const r = CELL / 2 - 6;
+    const isBlack = info.side === "black";
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = isBlack ? COLORS.cinnabar : COLORS.jade;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = COLORS.ink;
+    ctx.stroke();
+
+    if (info.promoted) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = COLORS.gold;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = COLORS.parchLight;
+    ctx.font = "bold 20px 'Microsoft YaHei', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(info.symbol || "?", cx, cy + 1);
+  }
+
+  function drawCornerBrackets() {
+    const w = canvas.width, h = canvas.height;
+    const len = 22, off = 8;
+    ctx.strokeStyle = COLORS.gold;
+    ctx.lineWidth = 2;
+    const corners = [
+      [[off, off + len], [off, off], [off + len, off]],
+      [[w - off - len, off], [w - off, off], [w - off, off + len]],
+      [[off, h - off - len], [off, h - off], [off + len, h - off]],
+      [[w - off - len, h - off], [w - off, h - off], [w - off, h - off - len]],
+    ];
+    corners.forEach((pts) => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      ctx.lineTo(pts[1][0], pts[1][1]);
+      ctx.lineTo(pts[2][0], pts[2][1]);
+      ctx.stroke();
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // 状态栏 / 历史记录 渲染
+  // -------------------------------------------------------------------
+  function renderStatus() {
+    statusEl.textContent = "当前行棋: " + (currentSide === "black" ? "黑方" : "白方");
+    const resultLabels = {
+      ongoing: "",
+      black_wins: "🏁 黑方胜",
+      white_wins: "🏁 白方胜",
+    };
+    resultEl.textContent = resultLabels[gameResult] || gameResult;
+    resultEl.classList.toggle("has-result", gameResult !== "ongoing");
+    gameIdChip.textContent = "对局: " + (gameId || "-");
+  }
+
+  function renderHistory() {
+    historyEl.innerHTML = "";
+    for (let i = 0; i < historyEntries.length; i += 2) {
+      const num = Math.floor(i / 2) + 1;
+      const black = historyEntries[i] || "";
+      const white = historyEntries[i + 1] || "";
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="num">${num}.</span>${black}   ${white}`;
+      historyEl.appendChild(li);
+    }
+    historyEl.scrollTop = historyEl.scrollHeight;
+  }
+
+  // -------------------------------------------------------------------
+  // 复盘（大厅、历史对局列表已经搬到主页，这里只保留"根据URL参数直接复盘"的能力）
+  // -------------------------------------------------------------------
+  const replayBarEl = document.getElementById("replay-bar");
+  const replayPositionLabelEl = document.getElementById("replay-position-label");
+
+  async function startReplay(id) {
+    const data = await apiGet(`/games/${id}/replay`);
+    if (!data.steps || data.steps.length === 0) {
+      setMessage(`对局 ${id} 还没有任何走子记录，无法复盘。`);
+      return;
+    }
+    if (socket) {
+      socket.onclose = null;
+      socket.close();
+      socket = null;
+    }
+    replayMode = true;
+    replaySteps = data.steps;
+    replayIndex = replaySteps.length - 1;
+    gameId = id;
+    replayBarEl.style.display = "flex";
+    showReplayStep();
+    setMessage(`正在复盘对局 ${id}（共 ${replaySteps.length} 步）`);
+  }
+
+  function showReplayStep() {
+    const step = replaySteps[replayIndex];
+    boardState = step.board;
+    currentSide = step.side; // 记录的是"走这步棋的一方"，直接标注更直观
+    gameResult = "ongoing";
+    boardFlipped = false; // 复盘固定用黑方视角，简单起见
+    selected = null;
+    legalDestinations = [];
+    renderStatus();
+    drawBoard();
+    replayPositionLabelEl.textContent = `第 ${replayIndex + 1} / ${replaySteps.length} 步：${step.notation}`;
+  }
+
+  function exitReplay() {
+    replayMode = false;
+    replaySteps = [];
+    replayIndex = -1;
+    replayBarEl.style.display = "none";
+    window.location.href = "index.html";
+  }
+
+  document.getElementById("btn-replay-prev").addEventListener("click", () => {
+    if (replayIndex > 0) {
+      replayIndex--;
+      showReplayStep();
+    }
+  });
+
+  document.getElementById("btn-replay-next").addEventListener("click", () => {
+    if (replayIndex < replaySteps.length - 1) {
+      replayIndex++;
+      showReplayStep();
+    }
+  });
+
+  document.getElementById("btn-replay-exit").addEventListener("click", exitReplay);
+
+  function setMessage(text) {
+    messageEl.textContent = text || "";
+  }
+
+  // -------------------------------------------------------------------
+  // WebSocket 实时同步
+  // -------------------------------------------------------------------
+  let socket = null;
+
+  function connectSocket(id) {
+    if (socket) {
+      socket.onclose = null; // 避免旧连接关闭时触发不必要的提示
+      socket.close();
+      socket = null;
+    }
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    socket = new WebSocket(`${protocol}//${location.host}/ws/games/${id}`);
+
+    socket.onmessage = (event) => {
+      const state = JSON.parse(event.data);
+      handleIncomingState(state);
+    };
+    socket.onerror = () => {
+      setMessage("实时连接出现问题，如果对方走棋后棋盘没反应，试试刷新页面。");
+    };
+  }
+
+  function syncHistory(state) {
+    if (state.move_count === historyEntries.length + 1 && state.last_move) {
+      historyEntries.push(state.last_move);
+    } else if (state.move_count < historyEntries.length) {
+      historyEntries.length = state.move_count;
+    }
+    renderHistory();
+  }
+
+  function handleIncomingState(state) {
+    syncHistory(state);
+    selected = null;
+    legalDestinations = [];
+    applyState(state);
+  }
+
+  // -------------------------------------------------------------------
+  // 后端交互
+  // -------------------------------------------------------------------
+  async function apiPost(path, body) {
+    const headers = { "Content-Type": "application/json" };
+    if (authToken) headers["X-Auth-Token"] = authToken;
+    const res = await fetch(path, {
+      method: "POST",
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "请求失败");
+    return data;
+  }
+
+  async function apiGet(path) {
+    const headers = {};
+    if (authToken) headers["X-Auth-Token"] = authToken;
+    const res = await fetch(path, { headers });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "请求失败");
+    return data;
+  }
+
+  function renderAuthStatus() {
+    if (authUsername) {
+      authStatusEl.innerHTML = `已登录：<span class="username">${authUsername}</span>`;
+      authUsernameInput.style.display = "none";
+      authPasswordInput.style.display = "none";
+      btnLogin.style.display = "none";
+      btnRegister.style.display = "none";
+      btnLogout.style.display = "block";
+    } else {
+      authStatusEl.textContent = "未登录（可以匿名对局）";
+      authUsernameInput.style.display = "block";
+      authPasswordInput.style.display = "block";
+      btnLogin.style.display = "block";
+      btnRegister.style.display = "block";
+      btnLogout.style.display = "none";
+    }
+  }
+
+  function setAuth(token, username) {
+    authToken = token;
+    authUsername = username;
+    if (token) {
+      localStorage.setItem("arkatana_token", token);
+      localStorage.setItem("arkatana_username", username);
+    } else {
+      localStorage.removeItem("arkatana_token");
+      localStorage.removeItem("arkatana_username");
+    }
+    renderAuthStatus();
+  }
+
+  btnLogin.addEventListener("click", async () => {
+    const username = authUsernameInput.value.trim();
+    const password = authPasswordInput.value;
+    if (!username || !password) {
+      setMessage("请输入用户名和密码");
+      return;
+    }
+    try {
+      const data = await apiPost("/login", { username, password });
+      setAuth(data.token, data.username);
+      authPasswordInput.value = "";
+      setMessage(`登录成功，欢迎 ${data.username}`);
+    } catch (err) {
+      setMessage("登录失败：" + err.message);
+    }
+  });
+
+  btnRegister.addEventListener("click", async () => {
+    const username = authUsernameInput.value.trim();
+    const password = authPasswordInput.value;
+    if (!username || !password) {
+      setMessage("请输入用户名和密码");
+      return;
+    }
+    try {
+      const data = await apiPost("/register", { username, password });
+      setMessage(`注册成功（${data.username}），现在可以登录了`);
+    } catch (err) {
+      setMessage("注册失败：" + err.message);
+    }
+  });
+
+  btnLogout.addEventListener("click", () => {
+    setAuth(null, null);
+    setMessage("已登出");
+  });
+
+  let clockState = { blackTime: null, whiteTime: null, timeControl: null, syncedAt: null };
+
+  function formatClock(seconds) {
+    if (seconds === null || seconds === undefined) return "--:--";
+    seconds = Math.max(0, seconds);
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  function renderGameInfo(state) {
+    const blackName = state.black_player || "匿名";
+    const whiteName = state.white_player || "匿名";
+    const modeLabel = state.rated ? "Rated" : "Casual";
+    const tcLabel = state.time_control
+      ? `${state.time_control.minutes_per_side}+${state.time_control.increment_seconds}`
+      : "无时间限制";
+
+    gameInfoEl.innerHTML = `
+      <div class="row"><span>黑方</span><span>${blackName}</span></div>
+      <div class="row"><span>白方</span><span>${whiteName}</span></div>
+      <div class="row"><span>模式</span><span>${modeLabel}</span></div>
+      <div class="row"><span>时间控制</span><span>${tcLabel}</span></div>
+      <div class="row"><span>黑方剩余</span><span class="clock" id="black-clock">${formatClock(state.black_time)}</span></div>
+      <div class="row"><span>白方剩余</span><span class="clock" id="white-clock">${formatClock(state.white_time)}</span></div>
+    `;
+  }
+
+  function tickClocks() {
+    if (!clockState.timeControl || gameResult !== "ongoing" || replayMode) return;
+    const elapsed = (Date.now() - clockState.syncedAt) / 1000;
+    let blackDisplay = clockState.blackTime;
+    let whiteDisplay = clockState.whiteTime;
+    if (currentSide === "black") blackDisplay = Math.max(0, clockState.blackTime - elapsed);
+    if (currentSide === "white") whiteDisplay = Math.max(0, clockState.whiteTime - elapsed);
+
+    const blackEl = document.getElementById("black-clock");
+    const whiteEl = document.getElementById("white-clock");
+    if (blackEl) {
+      blackEl.textContent = formatClock(blackDisplay);
+      blackEl.classList.toggle("low", blackDisplay < 20);
+    }
+    if (whiteEl) {
+      whiteEl.textContent = formatClock(whiteDisplay);
+      whiteEl.classList.toggle("low", whiteDisplay < 20);
+    }
+  }
+  setInterval(tickClocks, 500);
+
+  function applyState(state) {
+    boardState = state.board;
+    currentSide = state.current_side;
+    gameResult = state.result;
+    boardFlipped = !!(authUsername && state.white_player === authUsername);
+    clockState = {
+      blackTime: state.black_time,
+      whiteTime: state.white_time,
+      timeControl: state.time_control,
+      syncedAt: Date.now(),
+    };
+    renderStatus();
+    renderGameInfo(state);
+    drawBoard();
+
+    // 有时间控制、但棋钟还没开始走：说明这局还"晾在大厅里"等第二个人真正进来。
+    // 账号对局靠 /join 自动触发开始，这个按钮主要是给匿名对局用的手动入口。
+    const startBtn = document.getElementById("btn-start-game");
+    const stillWaiting = !!state.time_control && !state.clock_started && state.result === "ongoing";
+    startBtn.style.display = stillWaiting ? "block" : "none";
+  }
+
+  async function newGame() {
+    selected = null;
+    legalDestinations = [];
+    historyEntries = [];
+    renderHistory();
+    setMessage("正在创建新对局…");
+    const state = await apiPost("/games", {});
+    gameId = state.game_id;
+    applyState(state);
+    connectSocket(gameId);
+    setMessage("新对局已开始，黑方先行。");
+  }
+
+  function parseHistoryText(text) {
+    // 把 "1. Ba1xe5   d5-d7^" 这种记谱文本还原成 ["Ba1xe5", "d5-d7^"] 这样的数组
+    const entries = [];
+    text.split("\n").forEach((line) => {
+      const dotIndex = line.indexOf(".");
+      if (dotIndex === -1) return;
+      const rest = line.slice(dotIndex + 1).trim();
+      if (!rest) return;
+      rest.split(/\s+/).forEach((token) => entries.push(token));
+    });
+    return entries;
+  }
+
+  async function loadGame(id) {
+    setMessage(`正在加载对局 ${id} …`);
+    const state = await apiGet(`/games/${id}`);
+    gameId = id;
+    selected = null;
+    legalDestinations = [];
+    applyState(state);
+
+    historyEntries = [];
+    try {
+      const hist = await apiGet(`/games/${id}/history`);
+      historyEntries = parseHistoryText(hist.history);
+    } catch (e) {
+      // 走子记录拉取失败不影响继续下棋，忽略即可
+    }
+    renderHistory();
+    setMessage(`已加载对局 ${id}`);
+    connectSocket(gameId);
+
+    // 已登录的话，顺手尝试认领还没人认领的一方；
+    // 认领失败（比如已经是玩家、或者对局已满员）不算错误，静默忽略即可
+    if (authToken) {
+      try {
+        const joined = await apiPost(`/games/${id}/join`);
+        applyState(joined);
+        setMessage(`已加入对局 ${id}`);
+      } catch (e) {
+        // 忽略
+      }
+    }
+  }
+
+  async function selectSquare(sq) {
+    const info = boardState[sq];
+    if (!info || info.side !== currentSide) {
+      selected = null;
+      legalDestinations = [];
+      drawBoard();
+      return;
+    }
+    if (info.piece === "TH") {
+      selected = null;
+      legalDestinations = [];
+      drawBoard();
+      setMessage("王城不可移动");
+      return;
+    }
+    const data = await apiGet(`/games/${gameId}/legal-moves?coord=${sq}`);
+    selected = sq;
+    legalDestinations = data.legal_destinations;
+    drawBoard();
+    if (legalDestinations.length === 0) {
+      setMessage(`${sq} 这个棋子当前没有合法走法（可能被将军钉住了）。`);
+    } else {
+      setMessage("");
+    }
+  }
+
+  async function tryMove(from, to) {
+    try {
+      const state = await apiPost(`/games/${gameId}/move`, { from_sq: from, to_sq: to });
+      handleIncomingState(state);
+      setMessage(`${from} → ${to}：${state.last_move}`);
+    } catch (err) {
+      setMessage(err.message);
+      selected = null;
+      legalDestinations = [];
+      drawBoard();
+    }
+  }
+
+  canvas.addEventListener("click", (evt) => {
+    if (replayMode || gameResult !== "ongoing" || !gameId) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = (evt.clientX - rect.left) * scaleX;
+    const py = (evt.clientY - rect.top) * scaleY;
+    const sq = pixelToSquare(px, py);
+    if (!sq) return;
+
+    if (selected && legalDestinations.includes(sq)) {
+      tryMove(selected, sq);
+    } else {
+      selectSquare(sq);
+    }
+  });
+
+  document.getElementById("btn-start-game").addEventListener("click", async () => {
+    try {
+      const state = await apiPost(`/games/${gameId}/start`);
+      handleIncomingState(state);
+      setMessage("对局已开始！");
+    } catch (err) {
+      setMessage("开始对局失败：" + err.message);
+    }
+  });
+
+  document.getElementById("btn-undo").addEventListener("click", async () => {
+    try {
+      const state = await apiPost(`/games/${gameId}/undo`);
+      handleIncomingState(state);
+      setMessage("已悔棋。");
+    } catch (err) {
+      setMessage("悔棋失败：" + err.message);
+    }
+  });
+
+  document.getElementById("btn-resign").addEventListener("click", async () => {
+    if (gameResult !== "ongoing") {
+      setMessage("对局已结束");
+      return;
+    }
+    try {
+      const resigningSide = currentSide;
+      const state = await apiPost(`/games/${gameId}/resign`, { side: resigningSide });
+      handleIncomingState(state);
+      setMessage((resigningSide === "black" ? "黑方" : "白方") + "已认输。");
+    } catch (err) {
+      setMessage("操作失败：" + err.message);
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // 启动：根据网址参数决定进入什么模式
+  //   game.html?id=xxxx      加入/查看指定对局
+  //   game.html?replay=xxxx  直接进入复盘
+  //   都没有                  新建一局（主要用于开发时直接测试）
+  // -------------------------------------------------------------------
+  renderAuthStatus();
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const paramId = urlParams.get("id");
+  const paramReplay = urlParams.get("replay");
+
+  if (paramReplay) {
+    startReplay(paramReplay).catch((e) => setMessage("复盘加载失败：" + e.message));
+  } else if (paramId) {
+    loadGame(paramId).catch((e) => setMessage("加载对局失败：" + e.message));
+  } else {
+    newGame().catch((e) => setMessage("创建对局失败：" + e.message));
+  }
+})();
+</script>
+
+</body>
+</html>

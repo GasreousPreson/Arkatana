@@ -4,19 +4,22 @@ game.py
 Arkatana（古战棋）— 对局生命周期管理模块
 
 职责范围：
-    1. 管理一局棋的完整状态：当前棋盘、当前该谁走、走子历史、对局结果
+    1. 管理一局棋的完整状态：当前棋盘、当前该谁走、走子历史、对局结果、棋钟
     2. 提供对外核心接口（未来 FastAPI 直接调用这一层，不需要碰
        board/pieces/movement/rules 的细节）：
        - make_move(from, to)       执行一步棋（含合法性校验、升变判定、
-                                     轮次切换、胜负判断、重复走子检测）
+                                     轮次切换、胜负判断、重复走子检测、棋钟结算）
        - legal_moves_from(coord)   查询某个棋子当前的合法走法
-       - undo()                    悔棋（整局面快照还原）
+       - undo()                    悔棋（整局面快照还原，包含棋钟状态）
        - resign(side)              认输
-    3. 自动处理升变：兵/炮/剑士每步棋后检查是否到达指定排数，是则升变
+       - start_clocks()            开始计时（由调用方决定"什么时候算对局正式开始"）
+       - check_timeout()           检查当前行棋方是否超时，超时则直接判负
+    3. 自动处理升变：兵/炮/剑士/战车每步棋后检查是否到达指定排数，是则升变
     4. 自动处理重复走子判定：维护局面签名历史，三次重复触发白方获胜
+    5. 棋钟：time_control 为 None 表示无时间限制（例如"线下对练"模式）
 
-依赖：board.py、pieces.py、layout.py、rules.py
-被依赖：未来的 main.py（命令行测试）、notation.py（记谱）、以及 FastAPI 接口层
+依赖：board.py、pieces.py、layout.py、rules.py、notation.py、clock.py
+被依赖：main.py（命令行测试）、db.py（存档/复盘）、以及 FastAPI 接口层
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from rules import (
     is_checkmate,
 )
 from notation import compute_disambiguation
+from clock import Clock, TimeControl
 
 
 # ---------------------------------------------------------------------------
@@ -72,17 +76,22 @@ class MoveRecord(NamedTuple):
 # ---------------------------------------------------------------------------
 
 class Game:
-    def __init__(self):
+    def __init__(self, time_control: Optional[TimeControl] = None):
         self.board: Board = setup_initial_board()
         self.current_side: Side = Side.BLACK  # 黑方先手
         self.result: GameResult = GameResult.ONGOING
         self.move_log: list[MoveRecord] = []
 
+        # 棋钟：time_control 为 None 表示无时间限制（比如"线下对练"模式）。
+        # 注意：这里只是创建棋钟，并不会自动开始计时——
+        # 什么时候算"对局正式开始、可以开始计时"由调用方决定（调用 start_clocks()）。
+        self.clock = Clock(time_control)
+
         # 局面签名历史，用于三次重复走子判定；初始局面也计入一次
         self._position_history: list = [position_signature(self.board, self.current_side)]
 
         # 悔棋用的整局面快照栈：每步棋执行前压入一份快照
-        self._undo_stack: list[tuple[Board, Side, GameResult, list]] = []
+        self._undo_stack: list[tuple] = []
 
     # -- 查询接口 -----------------------------------------------------------
 
@@ -99,6 +108,25 @@ class Game:
     def is_over(self) -> bool:
         return self.result != GameResult.ONGOING
 
+    def start_clocks(self) -> None:
+        """开始计时：标记当前行棋方（通常是对局刚开始时的黑方）开始思考"""
+        self.clock.start_turn(self.current_side.value)
+
+    def check_timeout(self) -> bool:
+        """
+        检查当前行棋方是否已经超时；如果超时，直接结束对局（对方判胜），返回 True。
+        这是"惰性"检测——不会主动倒计时触发，而是在每次跟这局对局交互时
+        （查询状态、尝试走棋等）顺便检查一次。对局已经结束则不做任何事。
+        """
+        if self.result != GameResult.ONGOING:
+            return False
+        if self.clock.is_timeout(self.current_side.value):
+            loser = self.current_side
+            winner = other_side(loser)
+            self.result = GameResult.WHITE_WINS if winner == Side.WHITE else GameResult.BLACK_WINS
+            return True
+        return False
+
     # -- 核心操作：走棋 -----------------------------------------------------
 
     def make_move(self, from_sq: tuple[int, int], to_sq: tuple[int, int]) -> MoveRecord:
@@ -108,6 +136,9 @@ class Game:
         走法不合法则抛出 IllegalMoveError；对局已结束则抛出 GameOverError。
         """
         if self.result != GameResult.ONGOING:
+            raise GameOverError("对局已结束，无法继续走棋")
+
+        if self.check_timeout():
             raise GameOverError("对局已结束，无法继续走棋")
 
         move = self._find_legal_move(from_sq, to_sq)
@@ -128,8 +159,12 @@ class Game:
         piece = self.board.get(to_sq)
         promoted_now = self._maybe_promote(piece)
 
+        # 结算这一步用掉的思考时间（加上加秒），再把棋钟切给即将行棋的一方
+        self.clock.commit_move(mover_side.value)
+
         # 切换行棋方，再判断新的行棋方是否被将死（供记谱的 "#" 标记使用）
         self.current_side = other_side(mover_side)
+        self.clock.start_turn(self.current_side.value)
         checkmate_now = is_checkmate(self.board, self.current_side)
 
         record = MoveRecord(
@@ -158,14 +193,15 @@ class Game:
     # -- 悔棋 / 认输 ----------------------------------------------------------
 
     def undo(self) -> None:
-        """悔棋：还原到上一步棋之前的整局面快照"""
+        """悔棋：还原到上一步棋之前的整局面快照（包含棋钟状态）"""
         if not self._undo_stack:
             raise IllegalMoveError("没有可悔的棋")
-        board, side, result, pos_history = self._undo_stack.pop()
+        board, side, result, pos_history, clock = self._undo_stack.pop()
         self.board = board
         self.current_side = side
         self.result = result
         self._position_history = pos_history
+        self.clock = clock
         if self.move_log:
             self.move_log.pop()
 
@@ -215,11 +251,16 @@ class Game:
             self.current_side,
             self.result,
             list(self._position_history),
+            self.clock.clone(),
         )
 
     def __str__(self) -> str:
         turn = "黑方" if self.current_side == Side.BLACK else "白方"
         status = f"当前行棋方: {turn} | 状态: {self.result.value}"
+        if not self.clock.is_unlimited:
+            black_left = self.clock.time_left("black")
+            white_left = self.clock.time_left("white")
+            status += f" | 黑方剩余: {black_left:.0f}秒 | 白方剩余: {white_left:.0f}秒"
         return f"{status}\n{self.board}"
 
 
@@ -290,6 +331,46 @@ if __name__ == "__main__":
     )
     assert hussar_move.was_already_promoted is False
     assert hussar_move.is_checkmate is False
+
+    # 7) 棋钟集成测试：正常对局的计时与结算
+    from datetime import datetime, timedelta, timezone
+    from clock import TimeControl
+
+    timed_game = Game(TimeControl(minutes_per_side=10, increment_seconds=5))
+    assert timed_game.clock.time_left("black") == 600.0
+    timed_game.start_clocks()
+    assert timed_game.clock.active_side == "black"
+
+    # 手动把"这一步开始思考的时间"往前拨30秒，模拟黑方思考了30秒后走棋
+    timed_game.clock.turn_started_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+    timed_game.make_move_str("d5", "d6")
+    # 600 - 30(用掉) + 5(加秒) ≈ 575，允许有几秒的执行耗时误差
+    assert 570 <= timed_game.clock.remaining["black"] <= 576
+    assert timed_game.clock.active_side == "white", "走完棋后应该切给白方计时"
+
+    # 8) 超时判负测试
+    timeout_game = Game(TimeControl(minutes_per_side=1, increment_seconds=0))
+    timeout_game.start_clocks()
+    # 把黑方"开始思考"的时间拨到2分钟前，远超1分钟的时间控制，制造超时
+    timeout_game.clock.turn_started_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    assert timeout_game.check_timeout() is True
+    assert timeout_game.result == GameResult.WHITE_WINS, "黑方超时应该判白方胜"
+
+    try:
+        timeout_game.make_move_str("d5", "d6")
+        raise AssertionError("对局已经因超时结束，不应该还能走棋")
+    except GameOverError:
+        pass
+
+    # 9) 悔棋应该同时还原棋钟状态
+    undo_game = Game(TimeControl(minutes_per_side=10, increment_seconds=5))
+    undo_game.start_clocks()
+    remaining_before = undo_game.clock.remaining["black"]
+    undo_game.make_move_str("d5", "d6")
+    assert undo_game.clock.remaining["black"] != remaining_before, "走完一步棋钟应该已经变化"
+    undo_game.undo()
+    assert undo_game.clock.remaining["black"] == remaining_before, "悔棋应该把棋钟也还原回去"
+    assert undo_game.clock.active_side == "black", "悔棋后应该重新轮到黑方计时"
 
     print("game.py 自检全部通过 ✅")
     print()
