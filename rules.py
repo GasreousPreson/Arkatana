@@ -188,6 +188,7 @@ class GameResult(Enum):
     ONGOING = "ongoing"
     BLACK_WINS = "black_wins"
     WHITE_WINS = "white_wins"
+    DRAW = "draw"          # 双方同意和棋（规则本身不产生和局，只能由协商达成）
 
 
 def _winner_result(losing_side: Side) -> GameResult:

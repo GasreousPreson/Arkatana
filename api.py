@@ -38,6 +38,7 @@ from __future__ import annotations
 import uuid
 import secrets
 import random
+import time
 import os
 
 from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect, Security
@@ -90,6 +91,20 @@ GAME_RATED: dict[str, bool] = {}
 # 服务器重启后清空，纯粹用来区分"匿名对局里到底是不是同一个人在操作"）。
 GAME_GUEST_CLAIMS: dict[str, dict] = {}
 
+# 悔棋/和棋的协商状态（都是临时性的，服务器重启后清空，不需要持久化）
+#   GAME_OFFERS   : {game_id: {"kind": "retake"|"draw", "from": "black"|"white"}}
+#                   同一局同时最多只有一个待处理的提议
+#   GAME_COOLDOWN : {game_id: {("black","draw"): 可以再次提出的时间戳, ...}}
+#                   被拒绝后 60 秒内不能再提同一类提议
+#   GAME_DRAW_COUNT: {game_id: {"black": 已提和次数, "white": ...}}
+#                   每方最多提和 2 次
+GAME_OFFERS: dict[str, dict] = {}
+GAME_COOLDOWN: dict[str, dict] = {}
+GAME_DRAW_COUNT: dict[str, dict] = {}
+
+OFFER_COOLDOWN_SECONDS = 60
+MAX_DRAW_OFFERS_PER_SIDE = 2
+
 # 内存登录令牌存储：{token: username}
 # 注意：这是临时方案，服务器重启后所有人都需要重新登录。
 # 以后如果需要"记住登录状态"，可以把这张表也存进数据库。
@@ -140,6 +155,14 @@ class MoveRequest(BaseModel):
 
 class ResignRequest(BaseModel):
     side: str      # "black" 或 "white"
+
+
+class OfferRequest(BaseModel):
+    kind: str      # "retake"（悔棋）或 "draw"（提和）
+
+
+class OfferResponseRequest(BaseModel):
+    accept: bool   # True=同意，False=拒绝
 
 
 class CreateGameRequest(BaseModel):
@@ -211,6 +234,7 @@ def game_state(game_id: str, game: Game) -> dict:
         "rated": GAME_RATED.get(game_id, False),
         "clock_started": game.clock.active_side is not None,
         "in_check": is_in_check(game.board, game.current_side) if game.result.value == "ongoing" else False,
+        "pending_offer": GAME_OFFERS.get(game_id),
         "last_move_from": coord_to_str(*last_move_record.from_sq) if last_move_record else None,
         "last_move_to": coord_to_str(*last_move_record.to_sq) if last_move_record else None,
         **time_info,
@@ -259,6 +283,11 @@ def maybe_finalize_rating(game_id: str, game: Game) -> None:
     这里只需要负责"游戏一结束就调用一下"，不需要重复判断。
     """
     if game.result == GameResult.ONGOING:
+        return
+    if game.result == GameResult.DRAW:
+        # 评分公式目前只处理分出胜负的对局（rating.py 的 apply_game_result
+        # 只接受 "black"/"white"）。和棋按标准 Elo 应该各算 0.5 分，
+        # 这需要扩展评分模块，暂时先不结算，避免把和棋错算成某一方获胜。
         return
     winner = "black" if game.result == GameResult.BLACK_WINS else "white"
     db.finalize_rated_game(game_id, winner)
@@ -782,6 +811,120 @@ async def resign(
     state = game_state(game_id, game)
     await manager.broadcast(game_id, state)
     my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
+    return {**state, "my_side": my_side}
+
+
+@app.post("/games/{game_id}/offer")
+async def make_offer(
+    game_id: str,
+    body: OfferRequest,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
+    """
+    发起悔棋（retake）或和棋（draw）申请，等对方同意/拒绝。
+
+    各项限制：
+      - 悔棋只能在 casual 对局里用，rated 对局不允许
+      - 同一局同时只能有一个待处理的申请
+      - 被拒绝后 60 秒内不能再提同一类申请
+      - 提和每方最多 2 次，用完之后一律拒绝并提示
+    """
+    game = get_game_or_404(game_id)
+    if game.result.value != "ongoing":
+        raise HTTPException(status_code=409, detail="对局已结束")
+
+    kind = body.kind.strip().lower()
+    if kind not in ("retake", "draw"):
+        raise HTTPException(status_code=400, detail="kind 必须是 'retake' 或 'draw'")
+
+    my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
+    if my_side is None:
+        raise HTTPException(status_code=403, detail="你不是这局对局的玩家")
+
+    if kind == "retake":
+        if GAME_RATED.get(game_id, False):
+            raise HTTPException(status_code=403, detail="rated 对局不能悔棋")
+        if len(game.move_log) == 0:
+            raise HTTPException(status_code=400, detail="还没有可以悔的棋")
+
+    if game_id in GAME_OFFERS:
+        raise HTTPException(status_code=409, detail="已经有一个待处理的申请了")
+
+    # 60 秒冷却
+    cooldowns = GAME_COOLDOWN.setdefault(game_id, {})
+    ready_at = cooldowns.get((my_side, kind))
+    now = time.time()
+    if ready_at is not None and now < ready_at:
+        if kind == "draw":
+            raise HTTPException(status_code=429, detail="do not repeatedly offer a draw!")
+        raise HTTPException(
+            status_code=429,
+            detail=f"请等待 {int(ready_at - now) + 1} 秒后再次提出悔棋",
+        )
+
+    if kind == "draw":
+        counts = GAME_DRAW_COUNT.setdefault(game_id, {"black": 0, "white": 0})
+        if counts[my_side] >= MAX_DRAW_OFFERS_PER_SIDE:
+            raise HTTPException(status_code=429, detail="do not repeatedly offer a draw!")
+        counts[my_side] += 1
+
+    GAME_OFFERS[game_id] = {"kind": kind, "from": my_side}
+    state = game_state(game_id, game)
+    await manager.broadcast(game_id, state)
+    return {**state, "my_side": my_side}
+
+
+@app.post("/games/{game_id}/offer/respond")
+async def respond_to_offer(
+    game_id: str,
+    body: OfferResponseRequest,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
+    """
+    回应对方的悔棋/和棋申请。
+    同意悔棋 -> 退回到提出方上一次走棋之前（可能要退两步，
+    因为对手在那之后通常已经应了一手）。
+    同意和棋 -> 对局判和。
+    拒绝     -> 申请作废，提出方进入 60 秒冷却。
+    """
+    game = get_game_or_404(game_id)
+    offer = GAME_OFFERS.get(game_id)
+    if offer is None:
+        raise HTTPException(status_code=404, detail="当前没有待处理的申请")
+
+    my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
+    if my_side is None:
+        raise HTTPException(status_code=403, detail="你不是这局对局的玩家")
+    if my_side == offer["from"]:
+        raise HTTPException(status_code=403, detail="不能回应自己发出的申请")
+
+    kind = offer["kind"]
+    GAME_OFFERS.pop(game_id, None)
+
+    if not body.accept:
+        # 拒绝：提出方进入冷却
+        GAME_COOLDOWN.setdefault(game_id, {})[(offer["from"], kind)] = (
+            time.time() + OFFER_COOLDOWN_SECONDS
+        )
+    else:
+        if kind == "draw":
+            game.result = GameResult.DRAW
+        else:
+            # 悔棋：一直退到轮回提出方走棋为止
+            # （通常是退两步：对方的应手 + 提出方自己那一步）
+            steps = 0
+            while game.current_side.value != offer["from"] and len(game.move_log) > 0 and steps < 2:
+                game.undo()
+                steps += 1
+            if game.current_side.value != offer["from"] and len(game.move_log) > 0:
+                game.undo()
+        persist(game_id, game)
+        maybe_finalize_rating(game_id, game)
+
+    state = game_state(game_id, game)
+    await manager.broadcast(game_id, state)
     return {**state, "my_side": my_side}
 
 

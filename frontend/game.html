@@ -254,7 +254,7 @@
     align-items: center;
     gap: 3px;
     min-height: 24px;
-    max-width: 696px;
+    max-width: 734px;
     flex-wrap: wrap;
   }
   .piece-chip {
@@ -432,16 +432,15 @@
 
     <div class="action-row">
       <div class="action-btn-wrap" id="action-undo">
-        <button class="icon-btn" id="btn-undo" title="悔棋">↺</button>
+        <button class="icon-btn" id="btn-undo" title="retake（悔棋，需对方同意）">↺</button>
         <button class="cancel-x" id="cancel-undo">✕</button>
       </div>
       <div class="action-btn-wrap" id="action-draw">
-        <button class="icon-btn" id="btn-draw" title="提和">=</button>
+        <button class="icon-btn" id="btn-draw" title="draw（提和，需对方同意）">=</button>
         <button class="cancel-x" id="cancel-draw">✕</button>
-        <div class="badge-soon">协商功能开发中</div>
       </div>
       <div class="action-btn-wrap" id="action-resign">
-        <button class="icon-btn" id="btn-resign" title="认输">⚑</button>
+        <button class="icon-btn" id="btn-resign" title="resign（认输）">⚑</button>
         <button class="cancel-x" id="cancel-resign">✕</button>
       </div>
     </div>
@@ -464,7 +463,7 @@
   <div class="center-col">
     <div class="captured-row" id="captured-top"></div>
     <div id="board-wrap">
-      <canvas id="board" width="696" height="752"></canvas>
+      <canvas id="board" width="734" height="796"></canvas>
     </div>
     <div class="captured-row" id="captured-bottom"></div>
 
@@ -536,8 +535,8 @@
   const COLS = "abcdefghjkl";  // 跳过 i，避免与 j 混淆
   const MIN_ROW = 1;
   const MAX_ROW = 12;
-  const CELL = 56;
-  const MARGIN = 40;
+  const CELL = 62;   // 格子略微加大
+  const MARGIN = 26; // 带坐标的外框做薄
 
   const canvas = document.getElementById("board");
   const ctx = canvas.getContext("2d");
@@ -779,12 +778,12 @@
     for (let c = 0; c < COLS.length; c++) {
       const displayCol = boardFlipped ? (COLS.length - 1 - c) : c;
       const x = MARGIN + displayCol * CELL + CELL / 2;
-      ctx.fillText(COLS[c], x, MARGIN + (MAX_ROW - MIN_ROW + 1) * CELL + 18);
+      ctx.fillText(COLS[c], x, MARGIN + (MAX_ROW - MIN_ROW + 1) * CELL + 14);
     }
     ctx.textAlign = "right";
     for (let row = MIN_ROW; row <= MAX_ROW; row++) {
       const [, y] = squareTopLeft(0, row);
-      ctx.fillText(String(row), MARGIN - 10, y + CELL / 2);
+      ctx.fillText(String(row), MARGIN - 7, y + CELL / 2);
     }
 
     if (selected) highlightSquare(selected, COLORS.gold, 3);
@@ -866,18 +865,14 @@
   function drawPiece(sq, info, overrideCenter) {
     const [cx, cy] = overrideCenter || squareToPixelCenter(sq);
     const P = window.ArkatanaPieces;
-    const img = P ? P.getImage(info.piece, info.side) : null;
+    // 用棋子"当前所在格"选左版/右版素材；动画中的棋子用终点格，
+    // 这样飞行途中不会因为跨过中线而突然翻面
+    const img = P ? P.getImage(info.piece, info.side, sq) : null;
 
     if (img) {
       // 素材是正方形画布里的居中造型，按格子等比缩放画上去
-      const size = CELL * 0.88;
-      const mirror = P.shouldMirror(info.piece, sq);
-
-      ctx.save();
-      ctx.translate(cx, cy);
-      if (mirror) ctx.scale(-1, 1);   // 让右半边的棋子朝向棋盘中线
-      ctx.drawImage(img, -size / 2, -size / 2, size, size);
-      ctx.restore();
+      const size = CELL * 0.9;
+      ctx.drawImage(img, cx - size / 2, cy - size / 2, size, size);
 
       if (info.promoted) {
         // 升变标记：暂时统一金色边框；
@@ -915,7 +910,7 @@
 
   function drawCornerBrackets() {
     const w = canvas.width, h = canvas.height;
-    const len = 22, off = 8;
+    const len = 16, off = 5;
     ctx.strokeStyle = COLORS.gold;
     ctx.lineWidth = 2;
     const corners = [
@@ -1003,6 +998,37 @@
     document.getElementById("action-undo").classList.toggle("disabled-action", !!currentStateRated);
   }
 
+  function renderOfferBanner(offer) {
+    const el = document.getElementById("offer-banner");
+    if (!offer || gameResult !== "ongoing") {
+      el.style.display = "none";
+      el.innerHTML = "";
+      return;
+    }
+    const label = offer.kind === "draw" ? "offers draw" : "offers retake";
+
+    if (mySide && offer.from === mySide) {
+      // 自己发出的申请：只显示等待状态，没有同意/拒绝按钮
+      el.style.display = "flex";
+      el.innerHTML = `<span>你已 ${label}，等待对手回应…</span>`;
+      return;
+    }
+
+    // 对方发来的申请：显示同意/拒绝
+    el.style.display = "flex";
+    el.innerHTML = `<span>- ${label}</span>`;
+    const agree = document.createElement("button");
+    agree.className = "agree";
+    agree.textContent = "agree";
+    agree.addEventListener("click", () => respondToOffer(true));
+    const deny = document.createElement("button");
+    deny.className = "deny";
+    deny.textContent = "deny";
+    deny.addEventListener("click", () => respondToOffer(false));
+    el.appendChild(agree);
+    el.appendChild(deny);
+  }
+
   function armOrConfirm(action, confirmFn) {
     if (armedAction === action) {
       armedAction = null;
@@ -1038,19 +1064,34 @@
   document.getElementById("cancel-resign").addEventListener("click", (e) => { e.stopPropagation(); disarm(); });
 
   async function confirmUndo() {
+    // 悔棋现在是"发申请、等对方同意"，不再是自己直接退回
     try {
-      const state = await apiPost(`/games/${gameId}/undo`);
+      const state = await apiPost(`/games/${gameId}/offer`, { kind: "retake" });
       handleIncomingState(state);
-      setMessage("已悔棋。");
+      setMessage("已发出悔棋申请，等待对手回应…");
     } catch (err) {
-      setMessage("悔棋失败：" + err.message);
+      setMessage(err.message);
     }
   }
 
-  function confirmDraw() {
-    // 和棋协商（发起申请 -> 对方同意/拒绝 -> 60秒冷却）是独立的后端功能，还没有接入，
-    // 这里先如实告知，不假装真的发送了申请
-    setMessage("和棋协商功能正在开发中，暂时还不能真的发起提和。");
+  async function confirmDraw() {
+    try {
+      const state = await apiPost(`/games/${gameId}/offer`, { kind: "draw" });
+      handleIncomingState(state);
+      setMessage("已发出和棋申请，等待对手回应…");
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
+  async function respondToOffer(accept) {
+    try {
+      const state = await apiPost(`/games/${gameId}/offer/respond`, { accept });
+      handleIncomingState(state);
+      setMessage(accept ? "已接受对方的申请。" : "已拒绝对方的申请。");
+    } catch (err) {
+      setMessage(err.message);
+    }
   }
 
   async function confirmResign() {
@@ -1341,7 +1382,7 @@
       resultPanelEl.style.display = "none";
       return;
     }
-    const labels = { black_wins: "黑方获胜", white_wins: "白方获胜" };
+    const labels = { black_wins: "黑方获胜", white_wins: "白方获胜", draw: "双方和棋" };
     resultTextEl.textContent = labels[state.result] || state.result;
     resultPanelEl.style.display = "block";
   }
@@ -1417,6 +1458,7 @@
     renderGameInfo(state);
     renderPlayerCards(state);
     renderActionButtons();
+    renderOfferBanner(state.pending_offer);
     renderResultPanel(state);
     tickClocks();
 

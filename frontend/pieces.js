@@ -4,13 +4,14 @@
  * Arkatana（古戰棋）— 棋子素材加载与映射（低多边形版）
  *
  * 素材是带透明背景的独立造型 PNG，放在 frontend/pieces/ 下，
- * 命名规则：{side}_{piece}.png
+ * 命名规则：{side}_{piece}.png（王城/大将/攻城塔/兵）
+ *           {side}_{piece}_l.png / _r.png（其余棋子的左版/右版）
  *   side  : black / white
  *   piece : pawn rook chariot phoenix knight hussar throne ares ballista turret swordsman
  *
- * 朝向：每种棋子每个阵营**只需要一个朝向**的素材（默认朝右），
- * 棋盘右半边（g~l 列）的棋子由代码水平镜像，让两侧都朝向棋盘中线，
- * 跟实体棋的摆法一致。左右对称的棋子（王城、大将、兵）不参与镜像。
+ * 朝向：左右两版素材是实际画好的（不是代码翻转）——
+ * a~f 列用左版 _l，g~l 列用右版 _r，让两侧棋子都朝向棋盘中线。
+ * 王城、大将、攻城塔、兵只有单一造型，不带 _l/_r 后缀。
  *
  * 注意列字母已改为 abcdefghjkl（跳过 i，避免与 j 混淆）。
  */
@@ -36,26 +37,25 @@
     S:    "swordsman",
   };
 
-  const ALL_PIECES = ["pawn", "rook", "chariot", "phoenix", "knight", "hussar",
-                      "throne", "ares", "ballista", "turret", "swordsman"];
+  // 只有单一造型、不分左右的棋子（王城、大将、攻城塔、兵）
+  const NO_VARIANT = new Set(["TH", "A", "R", ""]);
 
-  // 造型本身左右对称、镜像了也看不出区别的棋子，不做翻转
-  // （兵目前是单一朝向的通用造型，先归入这一类；
-  //   以后如果补了左右手持械的分版，把 "" 从这里移出去即可）
-  const SYMMETRIC = new Set(["TH", "A", ""]);
+  // 有左右两版素材的棋子（素材本身就画好了朝向，代码不做镜像）
+  const VARIANT_PIECES = ["ballista", "chariot", "hussar", "knight",
+                          "phoenix", "swordsman", "turret"];
 
-  /** 这枚棋子该用哪张素材 */
-  function pieceImagePath(notation, side) {
+  /**
+   * 这枚棋子该用哪张素材。
+   * 左右两版是实际画好的（不是代码翻转），a~f 列用左版，g~l 列用右版，
+   * 这样两侧棋子都朝向棋盘中线，跟实体棋的摆法一致。
+   */
+  function pieceImagePath(notation, side, square) {
     const piece = PIECE_FILES[notation];
     if (piece === undefined) return null;
-    return `${BASE}${side}_${piece}.png`;
-  }
-
-  /** 这枚棋子在这个位置该不该水平镜像（让它朝向棋盘中线） */
-  function shouldMirror(notation, square) {
-    if (SYMMETRIC.has(notation)) return false;
-    if (!square) return false;
-    return COLS.indexOf(square[0]) >= 6;   // g 及其右侧
+    if (NO_VARIANT.has(notation)) return `${BASE}${side}_${piece}.png`;
+    const colIndex = square ? COLS.indexOf(square[0]) : 0;
+    const variant = colIndex >= 6 ? "r" : "l";
+    return `${BASE}${side}_${piece}_${variant}.png`;
   }
 
   // ---------------------------------------------------------------
@@ -70,7 +70,13 @@
     if (readyPromise) return readyPromise;
     const paths = [];
     ["black", "white"].forEach((side) => {
-      ALL_PIECES.forEach((p) => paths.push(`${BASE}${side}_${p}.png`));
+      ["ares", "rook", "throne", "pawn"].forEach((p) => {
+        paths.push(`${BASE}${side}_${p}.png`);
+      });
+      VARIANT_PIECES.forEach((p) => {
+        paths.push(`${BASE}${side}_${p}_l.png`);
+        paths.push(`${BASE}${side}_${p}_r.png`);
+      });
     });
     readyPromise = Promise.all(paths.map((path) => new Promise((resolve) => {
       const img = new Image();
@@ -82,8 +88,8 @@
   }
 
   /** 取已加载好的素材；没有则返回 null（调用方退回占位画法） */
-  function getImage(notation, side) {
-    const path = pieceImagePath(notation, side);
+  function getImage(notation, side, square) {
+    const path = pieceImagePath(notation, side, square);
     return path ? (cache[path] || null) : null;
   }
 
@@ -92,5 +98,5 @@
     return Object.keys(cache).length;
   }
 
-  global.ArkatanaPieces = { pieceImagePath, shouldMirror, preloadAll, getImage, loadedCount };
+  global.ArkatanaPieces = { pieceImagePath, preloadAll, getImage, loadedCount };
 })(window);
