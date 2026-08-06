@@ -15,9 +15,9 @@ Arkatana（古战棋）— 棋盘底层模块
     - 不做开局摆位（交给 layout.py）
 
 坐标约定：
-    - 外部记谱格式：字母+数字，例如 "d4"、"k12"（棋盘上常见的写法）
+    - 外部记谱格式：字母+数字，例如 "d4"、"l12"（棋盘上常见的写法）
     - 内部索引格式：(col_index, row_index)，均为从 0 开始的整数
-      例如 "a1" -> (0, 1)，"k12" -> (10, 12)
+      例如 "a1" -> (0, 1)，"l12" -> (10, 12)
       注意：行号沿用棋规原始编号 1~12（不做 0 基转换），
       只有"列"做了 0 基索引，这样便于换算的同时也保留了直觉上的行号。
 """
@@ -30,7 +30,9 @@ from typing import Optional, Iterator
 # 基础常量
 # ---------------------------------------------------------------------------
 
-COLUMNS = "abcdefghijk"   # 11 列，a 在最左，k 在最右
+COLUMNS = "abcdefghjkl"   # 11 列，a 在最左，l 在最右。
+                          # 刻意跳过字母 i：手写和阅读记谱时 i 与 j 极易混淆，
+                          # 所以 h 之后直接接 j（与国际象棋无关，是本棋种自己的约定）。
 NUM_COLS = len(COLUMNS)   # 11
 MIN_ROW = 1
 MAX_ROW = 12
@@ -73,7 +75,7 @@ def is_valid_coord(col: int, row: int) -> bool:
 def parse_coord(text: str) -> tuple[int, int]:
     """
     外部记谱 -> 内部坐标 (col_index, row)
-    例："d4" -> (3, 4)，"k12" -> (10, 12)
+    例："d4" -> (3, 4)，"l12" -> (10, 12)
     """
     text = text.strip().lower()
     if len(text) < 2:
@@ -263,9 +265,9 @@ class Board:
 if __name__ == "__main__":
     # 坐标转换测试
     assert parse_coord("d4") == (3, 4)
-    assert parse_coord("k12") == (10, 12)
+    assert parse_coord("l12") == (10, 12)
     assert coord_to_str(3, 4) == "d4"
-    assert coord_to_str(10, 12) == "k12"
+    assert coord_to_str(10, 12) == "l12"
 
     # 几何关系测试
     assert same_diagonal((3, 4), (6, 7)) is True

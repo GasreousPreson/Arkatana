@@ -37,13 +37,13 @@ BLACK_LAYOUT: dict[type, list[str]] = {
     Pawn:      [f"{c}5" for c in COLUMNS],          # 第5排，11列全部部署
     Ares:      ["f4"],
     Ballista:  ["d4", "h4"],
-    Turret:    ["a4", "k4"],
-    Rook:      ["a1", "k1"],
-    Chariot:   ["b1", "j1"],
-    Phoenix:   ["c1", "i1"],
+    Turret:    ["a4", "l4"],
+    Rook:      ["a1", "l1"],
+    Chariot:   ["b1", "k1"],
+    Phoenix:   ["c1", "j1"],
     Knight:    ["d1", "h1"],
     Swordsman: ["e1", "g1"],
-    Hussar:    ["c2", "i2"],
+    Hussar:    ["c2", "j2"],
 }
 
 
@@ -56,13 +56,13 @@ WHITE_LAYOUT: dict[type, list[str]] = {
     Pawn:      [f"{c}8" for c in COLUMNS],          # 第8排，11列全部部署
     Ares:      ["f9"],
     Ballista:  ["d9", "h9"],
-    Turret:    ["a9", "k9"],
-    Rook:      ["a12", "k12"],
-    Chariot:   ["b12", "j12"],
-    Phoenix:   ["c12", "i12"],
+    Turret:    ["a9", "l9"],
+    Rook:      ["a12", "l12"],
+    Chariot:   ["b12", "k12"],
+    Phoenix:   ["c12", "j12"],
     Knight:    ["d12", "h12"],
     Swordsman: ["e12", "g12"],
-    Hussar:    ["c11", "i11"],
+    Hussar:    ["c11", "j11"],
 }
 
 

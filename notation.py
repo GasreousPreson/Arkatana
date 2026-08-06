@@ -369,11 +369,11 @@ if __name__ == "__main__":
     from_sq, to_sq = parse_move_notation(d5_pawn_move_text, replay_board, Side.BLACK)
     assert from_sq == parse_coord("d5") and to_sq == parse_coord("d6")
 
-    # 有歧义：黑方 c2/i2 轻骑士都能走到 f3，"Hcf3" 应该解析回 c2，"Hif3" 应该解析回 i2
+    # 有歧义：黑方 c2/j2 轻骑士都能走到 f3，"Hcf3" 应该解析回 c2，"Hjf3" 应该解析回 i2
     from_sq_c, to_sq_c = parse_move_notation("Hcf3", replay_board, Side.BLACK)
     assert from_sq_c == parse_coord("c2") and to_sq_c == parse_coord("f3")
-    from_sq_i, to_sq_i = parse_move_notation("Hif3", replay_board, Side.BLACK)
-    assert from_sq_i == parse_coord("i2") and to_sq_i == parse_coord("f3")
+    from_sq_i, to_sq_i = parse_move_notation("Hjf3", replay_board, Side.BLACK)
+    assert from_sq_i == parse_coord("j2") and to_sq_i == parse_coord("f3")
 
     # 3) 局面记谱往返：初始局面
     board = setup_initial_board()
@@ -403,18 +403,18 @@ if __name__ == "__main__":
     assert restored_pawn.has_moved is True, "局面记谱应保留是否已走过的状态"
     assert restored_side2 == Side.WHITE
 
-    # 5) 消歧义计算：列字母消歧义（复刻用户给的例子：c2/i2 轻骑士都能走到 f3）
+    # 5) 消歧义计算：列字母消歧义（复刻用户给的例子：c2/j2 轻骑士都能走到 f3）
     from board import Board
     from pieces import Hussar, Knight
 
     board5 = Board()
     hussar_c2 = Hussar(Side.BLACK, parse_coord("c2"))
-    hussar_i2 = Hussar(Side.BLACK, parse_coord("i2"))
+    hussar_j2 = Hussar(Side.BLACK, parse_coord("j2"))
     board5.set(hussar_c2.position, hussar_c2)
-    board5.set(hussar_i2.position, hussar_i2)
+    board5.set(hussar_j2.position, hussar_j2)
     f3 = parse_coord("f3")
     assert compute_disambiguation(board5, hussar_c2, f3) == "c"
-    assert compute_disambiguation(board5, hussar_i2, f3) == "i"
+    assert compute_disambiguation(board5, hussar_j2, f3) == "j"
 
     # 6) 消歧义计算：列字母无法区分时改用排数字（两个重骑士同在 d 列，行不同）
     board6 = Board()

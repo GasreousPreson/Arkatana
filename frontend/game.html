@@ -525,6 +525,7 @@
 
 </div>
 
+<script src="pieces.js"></script>
 <script>
 (() => {
   "use strict";
@@ -532,7 +533,7 @@
   // -------------------------------------------------------------------
   // 棋盘几何常量（需与 board.py 的坐标系统保持一致：a~k / 1~12）
   // -------------------------------------------------------------------
-  const COLS = "abcdefghijk";
+  const COLS = "abcdefghjkl";  // 跳过 i，避免与 j 混淆
   const MIN_ROW = 1;
   const MAX_ROW = 12;
   const CELL = 56;
@@ -575,6 +576,12 @@
   let lastMoveTo = null;
   let armedAction = null;     // "undo" | "draw" | "resign" | null
 
+  // 走子动画：所有棋子从起点滑到终点固定 0.4 秒
+  const ANIM_MS = 400;
+  let anim = null;            // { fromSq, toSq, movingInfo, capturedInfo, startedAt }
+  let animRaf = null;
+  let prevBoardState = null;  // 上一帧的棋盘，用来对比出"这一步是谁走的、吃了什么"
+
   let replayMode = false;
   let replaySteps = [];
   let replayIndex = -1;
@@ -598,6 +605,97 @@
   const resultTextEl = document.getElementById("result-text");
 
   const ratingCache = {};
+
+  // -------------------------------------------------------------------
+  // 音效：用 Web Audio 现场合成，不依赖外部音频文件
+  //   走子 —— 木块放到桌面上的闷响：低频正弦 + 短促噪声，快速衰减
+  //   吃子 —— 石块被敲碎：更亮更粗糙的噪声爆发 + 一点低频冲击
+  // 浏览器要求用户先与页面交互过才允许播放声音，所以这里是懒初始化。
+  // -------------------------------------------------------------------
+  let audioCtx = null;
+
+  function ensureAudio() {
+    if (audioCtx === null) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    return audioCtx;
+  }
+
+  function makeNoiseBuffer(ctx, seconds) {
+    const length = Math.floor(ctx.sampleRate * seconds);
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < length; i++) {
+      // 越往后越弱，模拟撞击后的快速衰减
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 2.5);
+    }
+    return buffer;
+  }
+
+  function playMoveSound() {
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // 低频"咚"——木头的实心感
+    const osc = ctx.createOscillator();
+    const oscGain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(180, now);
+    osc.frequency.exponentialRampToValueAtTime(90, now + 0.09);
+    oscGain.gain.setValueAtTime(0.34, now);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+    osc.connect(oscGain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.12);
+
+    // 一点点噪声，模拟木片接触桌面的"嗒"
+    const noise = ctx.createBufferSource();
+    noise.buffer = makeNoiseBuffer(ctx, 0.05);
+    const noiseFilter = ctx.createBiquadFilter();
+    noiseFilter.type = "lowpass";
+    noiseFilter.frequency.value = 2200;
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.16, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+    noise.connect(noiseFilter).connect(noiseGain).connect(ctx.destination);
+    noise.start(now);
+  }
+
+  function playCaptureSound() {
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // 明亮粗糙的噪声爆发——石头碎裂
+    const noise = ctx.createBufferSource();
+    noise.buffer = makeNoiseBuffer(ctx, 0.16);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.setValueAtTime(2600, now);
+    bp.frequency.exponentialRampToValueAtTime(900, now + 0.15);
+    bp.Q.value = 0.8;
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.42, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.17);
+    noise.connect(bp).connect(noiseGain).connect(ctx.destination);
+    noise.start(now);
+
+    // 底下垫一层低频冲击，让"敲碎"更有重量
+    const osc = ctx.createOscillator();
+    const oscGain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(150, now);
+    osc.frequency.exponentialRampToValueAtTime(60, now + 0.12);
+    oscGain.gain.setValueAtTime(0.3, now);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    osc.connect(oscGain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  }
 
   // -------------------------------------------------------------------
   // 坐标 <-> 像素 转换
@@ -698,8 +796,27 @@
     drawCornerBrackets();
 
     Object.entries(boardState).forEach(([sq, info]) => {
+      // 正在做移动动画的那枚棋子，先不画在终点格，等下按动画位置画
+      if (anim && anim.toSq === sq) return;
       drawPiece(sq, info);
     });
+
+    // 被吃的棋子留在原地，等动画走完才消失（规格要求）
+    if (anim && anim.capturedInfo) {
+      drawPiece(anim.toSq, anim.capturedInfo);
+    }
+
+    // 移动中的棋子画在插值出来的位置上
+    if (anim) {
+      const t = Math.min(1, (performance.now() - anim.startedAt) / ANIM_MS);
+      // easeOutCubic：起步快、落子稳，手感更像真的把棋子放下去
+      const eased = 1 - Math.pow(1 - t, 3);
+      const [fx, fy] = squareToPixelCenter(anim.fromSq);
+      const [tx, ty] = squareToPixelCenter(anim.toSq);
+      const cx = fx + (tx - fx) * eased;
+      const cy = fy + (ty - fy) * eased;
+      drawPiece(anim.toSq, anim.movingInfo, [cx, cy]);
+    }
   }
 
   function fillSquare(sq, color) {
@@ -746,29 +863,49 @@
     }
   }
 
-  function drawPiece(sq, info) {
-    const [cx, cy] = squareToPixelCenter(sq);
-    const r = CELL / 2 - 6;
-    const isBlack = info.side === "black";
+  function drawPiece(sq, info, overrideCenter) {
+    const [cx, cy] = overrideCenter || squareToPixelCenter(sq);
+    const P = window.ArkatanaPieces;
+    const img = P ? P.getImage(info.piece, info.side) : null;
 
+    if (img) {
+      // 素材是正方形画布里的居中造型，按格子等比缩放画上去
+      const size = CELL * 0.88;
+      const mirror = P.shouldMirror(info.piece, sq);
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      if (mirror) ctx.scale(-1, 1);   // 让右半边的棋子朝向棋盘中线
+      ctx.drawImage(img, -size / 2, -size / 2, size, size);
+      ctx.restore();
+
+      if (info.promoted) {
+        // 升变标记：暂时统一金色边框；
+        // 正式版将区分为 白棋升变→金色 / 黑棋升变→铜色
+        const box = CELL * 0.92;
+        ctx.strokeStyle = COLORS.gold;
+        ctx.lineWidth = 2.5;
+        ctx.strokeRect(cx - box / 2, cy - box / 2, box, box);
+      }
+      return;
+    }
+
+    // 素材还没画好/还没加载完时的占位画法，避免棋盘一片空白
+    const r = CELL / 2 - 6;
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = isBlack ? COLORS.cinnabar : COLORS.jade;
+    ctx.fillStyle = info.side === "black" ? COLORS.cinnabar : COLORS.jade;
     ctx.fill();
     ctx.lineWidth = 2;
     ctx.strokeStyle = COLORS.ink;
     ctx.stroke();
-
     if (info.promoted) {
-      // 占位规则：升变棋子暂时统一用金色描边标记；
-      // 正式版将区分为 白棋升变→金色 / 黑棋升变→铜色（棋子美术定稿后一起换上）
       ctx.beginPath();
       ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
       ctx.strokeStyle = COLORS.gold;
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-
     ctx.fillStyle = COLORS.parchLight;
     ctx.font = "bold 20px 'Microsoft YaHei', sans-serif";
     ctx.textAlign = "center";
@@ -961,6 +1098,10 @@
     lastMoveFrom = null;
     lastMoveTo = null;
     inCheck = false;
+    // 复盘是跳步浏览，不该有滑动动画；清掉可能残留的动画状态
+    anim = null;
+    if (animRaf) { cancelAnimationFrame(animRaf); animRaf = null; }
+    prevBoardState = boardState;
     drawBoard();
     renderCaptured();
     replayPositionLabelEl.textContent = `第 ${replayIndex + 1} / ${replaySteps.length} 步：${step.notation}`;
@@ -1205,7 +1346,42 @@
     resultPanelEl.style.display = "block";
   }
 
+  function detectMove(prev, next, fromSq, toSq) {
+    // 用后端给的 last_move_from/to 定位这一步棋，再从前后棋盘取出
+    // "移动的是哪枚棋子""终点原本有没有子（也就是吃没吃）"
+    if (!prev || !fromSq || !toSq) return null;
+    const movingInfo = next[toSq];
+    if (!movingInfo) return null;
+    if (!prev[fromSq]) return null;          // 起点原本就没子，说明不是一步正常的走子
+    const capturedInfo = prev[toSq] || null;
+    return { fromSq, toSq, movingInfo, capturedInfo };
+  }
+
+  function startMoveAnimation(detected) {
+    anim = { ...detected, startedAt: performance.now() };
+    if (animRaf) cancelAnimationFrame(animRaf);
+
+    const step = () => {
+      const elapsed = performance.now() - anim.startedAt;
+      if (elapsed >= ANIM_MS) {
+        // 动画结束：被吃的棋子此刻才消失（规格要求"待移动动画走完后瞬间消失"）
+        const wasCapture = !!anim.capturedInfo;
+        anim = null;
+        animRaf = null;
+        drawBoard();
+        renderCaptured();
+        if (wasCapture) playCaptureSound(); else playMoveSound();
+        return;
+      }
+      drawBoard();
+      animRaf = requestAnimationFrame(step);
+    };
+    animRaf = requestAnimationFrame(step);
+  }
+
   function applyState(state) {
+    const previousBoard = prevBoardState;
+
     boardState = state.board;
     currentSide = state.current_side;
     gameResult = state.result;
@@ -1223,8 +1399,21 @@
       syncedAt: Date.now(),
     };
 
-    drawBoard();
-    renderCaptured();
+    // 只有"棋子数正好多走了一步"时才播动画：
+    // 刚进对局、悔棋、复盘跳步这些情况不该有滑动效果
+    const detected = (!replayMode && previousBoard)
+      ? detectMove(previousBoard, boardState, lastMoveFrom, lastMoveTo)
+      : null;
+    prevBoardState = boardState;
+
+    if (detected) {
+      startMoveAnimation(detected);
+    } else {
+      anim = null;
+      drawBoard();
+      renderCaptured();
+    }
+
     renderGameInfo(state);
     renderPlayerCards(state);
     renderActionButtons();
@@ -1347,6 +1536,14 @@
   //   都没有                  新建一局（主要用于开发时直接测试）
   // -------------------------------------------------------------------
   renderAuthStatus();
+
+  // 棋子素材预加载：加载完之后重绘一次，把首屏的占位圆牌换成正式造型。
+  // 素材还没画好的棋子会一直保持占位样式，不影响下棋。
+  if (window.ArkatanaPieces) {
+    window.ArkatanaPieces.preloadAll().then(() => {
+      if (!anim) drawBoard();
+    });
+  }
 
   const urlParams = new URLSearchParams(window.location.search);
   const paramId = urlParams.get("id");

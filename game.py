@@ -323,11 +323,11 @@ if __name__ == "__main__":
     except GameOverError:
         pass
 
-    # 6) 消歧义字段的集成测试：开局黑方 c2/i2 两个轻骑士都能走到 f3
+    # 6) 消歧义字段的集成测试：开局黑方 c2/j2 两个轻骑士都能走到 f3
     game3 = Game()
     hussar_move = game3.make_move_str("c2", "f3")
     assert hussar_move.disambiguation == "c", (
-        f"c2 轻骑士走到 f3 应该标注消歧义列字母 'c'（因为 i2 也能到），实际: {hussar_move.disambiguation!r}"
+        f"c2 轻骑士走到 f3 应该标注消歧义列字母 'c'（因为 j2 也能到），实际: {hussar_move.disambiguation!r}"
     )
     assert hussar_move.was_already_promoted is False
     assert hussar_move.is_checkmate is False
