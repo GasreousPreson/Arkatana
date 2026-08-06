@@ -6,12 +6,15 @@
 <title>古戰棋 Arkatana</title>
 <style>
   :root {
-    --ink: #1b1b1e;
+    --ink: #17161a;
+    --ink-raised: #232228;
     --parchment-light: #ede3c8;
     --parchment-dark: #cbb98d;
-    --cinnabar: #a6362b;   /* 黑方（先手）标记色 */
-    --jade: #3f6656;       /* 白方（后手）标记色 */
+    --cinnabar: #a6362b;
+    --jade: #3f6656;
     --gold: #b8944b;
+    --gold-soft: rgba(184, 148, 75, 0.16);
+    --danger: #c0392b;
   }
 
   * { box-sizing: border-box; }
@@ -22,80 +25,251 @@
     background: var(--ink);
     color: var(--parchment-light);
     font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+  }
+
+  a { color: var(--gold); }
+
+  /* ------------------------------------------------------------ */
+  /* 顶部条                                                          */
+  /* ------------------------------------------------------------ */
+  header.top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 20px;
+    border-bottom: 1px solid rgba(184, 148, 75, 0.25);
+  }
+  header.top-bar .brand {
+    font-family: "SimSun", "Songti SC", Georgia, serif;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    font-size: 18px;
+    text-decoration: none;
+    color: var(--parchment-light);
+  }
+  header.top-bar .right-info {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 12px;
+    color: var(--gold);
+  }
+  #game-id-chip { opacity: 0.75; }
+
+  /* ------------------------------------------------------------ */
+  /* 三栏布局                                                        */
+  /* ------------------------------------------------------------ */
+  .table-layout {
+    display: flex;
+    gap: 18px;
+    align-items: flex-start;
+    justify-content: center;
+    flex-wrap: wrap;
+    padding: 20px 16px 60px;
+  }
+
+  .side-col {
+    width: 250px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .center-col {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 24px 16px 48px;
+    gap: 6px;
   }
 
-  header {
-    text-align: center;
-    margin-bottom: 18px;
-  }
-
-  header h1 {
-    font-family: "SimSun", "Songti SC", Georgia, serif;
-    font-weight: 700;
-    letter-spacing: 0.15em;
-    font-size: 28px;
-    margin: 0 0 4px;
-    color: var(--parchment-light);
-  }
-
-  header .subtitle {
-    font-size: 12px;
-    letter-spacing: 0.2em;
-    color: var(--gold);
-    text-transform: uppercase;
-  }
-
-  #status-bar {
-    margin-top: 10px;
-    font-size: 14px;
-    display: flex;
-    gap: 18px;
-    justify-content: center;
-    flex-wrap: wrap;
-  }
-
-  .status-chip {
-    padding: 4px 12px;
+  .card {
     border: 1px solid var(--gold);
-    border-radius: 3px;
-    background: rgba(184, 148, 75, 0.08);
+    background: var(--gold-soft);
+    border-radius: 4px;
+    padding: 12px 14px;
+  }
+  .card h2 {
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin: 0 0 8px;
   }
 
-  .side-tag { display: inline-flex; align-items: center; gap: 6px; }
-
-  #result-chip {
-    font-weight: 700;
-    transition: font-size 0.15s ease;
+  /* ------------------------------------------------------------ */
+  /* 棋手信息卡 + 棋钟                                                */
+  /* ------------------------------------------------------------ */
+  .player-card {
+    border: 1px solid var(--gold);
+    background: var(--ink-raised);
+    border-radius: 4px;
+    padding: 10px 12px;
   }
-  #result-chip.has-result {
-    font-size: 22px;
-    padding: 8px 20px;
-    background: rgba(184, 148, 75, 0.18);
-    border-width: 2px;
-  }
-  .side-dot {
-    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
-  }
-  .side-dot.black { background: var(--cinnabar); }
-  .side-dot.white { background: var(--jade); }
-
-  main {
+  .player-card .name-row {
     display: flex;
-    gap: 24px;
-    align-items: flex-start;
-    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 14px;
+    margin-bottom: 8px;
+  }
+  .player-card .name-row .name { font-weight: 700; }
+  .player-card .name-row .rating {
+    color: var(--gold);
+    font-size: 13px;
+  }
+  .player-card .name-row .rating .delta { font-size: 11px; margin-left: 3px; }
+  .player-card .name-row .rating .delta.up { color: #6fae6f; }
+  .player-card .name-row .rating .delta.down { color: var(--cinnabar); }
+
+  .clock-box {
+    background: #8a6a1e;
+    color: #fff;
+    border-radius: 3px;
+    padding: 6px 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: Consolas, "Courier New", monospace;
+    opacity: 0.55;
+  }
+  .clock-box.active {
+    background: var(--gold);
+    opacity: 1;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.25) inset;
+  }
+  .clock-box .time { font-size: 22px; font-weight: 700; }
+  .clock-box .increment { font-size: 12px; opacity: 0.85; }
+  .clock-box.low { background: var(--danger); }
+
+  /* ------------------------------------------------------------ */
+  /* 走子记录                                                        */
+  /* ------------------------------------------------------------ */
+  .move-list-card {
+    border: 1px solid var(--gold);
+    background: rgba(184, 148, 75, 0.05);
+    border-radius: 4px;
+    flex: 1;
+    min-height: 120px;
+    max-height: 260px;
+    overflow-y: auto;
+    padding: 8px 10px;
+  }
+  #history-log {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  #history-log li { display: flex; gap: 8px; opacity: 0.9; }
+  #history-log li span.num { color: var(--gold); width: 22px; flex-shrink: 0; }
+  #history-log li span.mv { min-width: 68px; }
+
+  /* ------------------------------------------------------------ */
+  /* 操作按钮：悔棋 / 和棋 / 认输                                        */
+  /* ------------------------------------------------------------ */
+  .action-row {
+    display: flex;
+    gap: 8px;
     justify-content: center;
   }
-
-  #board-wrap {
+  .action-btn-wrap {
     position: relative;
-    max-width: 92vw;
+    flex: 1;
+  }
+  .icon-btn {
+    width: 100%;
+    padding: 10px 0;
+    font-size: 18px;
+    background: var(--ink-raised);
+    color: var(--parchment-light);
+    border: 1px solid var(--gold);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.12s, opacity 0.12s;
+  }
+  .icon-btn:hover { background: rgba(184,148,75,0.25); }
+  .action-btn-wrap.armed .icon-btn {
+    background: var(--gold);
+    color: var(--ink);
+  }
+  .action-btn-wrap.disabled-action .icon-btn {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  .cancel-x {
+    display: none;
+    position: absolute;
+    top: -8px; right: -8px;
+    width: 20px; height: 20px;
+    padding: 0;
+    line-height: 18px;
+    font-size: 12px;
+    border-radius: 50%;
+    background: var(--danger);
+    color: #fff;
+    border: 1px solid var(--ink);
+    cursor: pointer;
+  }
+  .action-btn-wrap.armed .cancel-x { display: block; }
+  .action-btn-wrap .badge-soon {
+    position: absolute;
+    bottom: -6px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 9px;
+    white-space: nowrap;
+    color: var(--gold);
+    opacity: 0.6;
   }
 
+  .offer-banner {
+    display: none;
+    font-size: 12px;
+    text-align: center;
+    padding: 6px 8px;
+    border: 1px solid var(--gold);
+    border-radius: 4px;
+    background: var(--gold-soft);
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  .offer-banner .agree {
+    background: #4c8c4c; color: #fff; border: none;
+    border-radius: 3px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+  }
+  .offer-banner .deny {
+    background: var(--danger); color: #fff; border: none;
+    border-radius: 3px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+  }
+
+  /* ------------------------------------------------------------ */
+  /* 棋盘 + 吃子栏                                                    */
+  /* ------------------------------------------------------------ */
+  .captured-row {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    min-height: 24px;
+    max-width: 696px;
+    flex-wrap: wrap;
+  }
+  .piece-chip {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+    border: 1px solid var(--ink);
+    flex-shrink: 0;
+  }
+  .piece-chip.black { background: var(--cinnabar); color: var(--parchment-light); }
+  .piece-chip.white { background: var(--jade); color: var(--parchment-light); }
+  .piece-chip.pawn-chip { width: 16px; height: 16px; font-size: 9px; margin-left: -4px; }
+
+  #board-wrap { position: relative; max-width: 92vw; }
   canvas#board {
     background: var(--parchment-light);
     border-radius: 2px;
@@ -105,231 +279,250 @@
     cursor: pointer;
   }
 
-  aside.panel {
-    width: 240px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .card {
-    border: 1px solid var(--gold);
-    background: rgba(184, 148, 75, 0.06);
-    border-radius: 3px;
-    padding: 12px 14px;
-  }
-
-  .card h2 {
-    font-size: 13px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--gold);
-    margin: 0 0 10px;
-  }
-
-  input[type="text"], input[type="password"] {
-    width: 100%;
-    padding: 8px 10px;
-    margin-bottom: 8px;
-    font-size: 14px;
-    background: var(--parchment-light);
-    color: var(--ink);
-    border: 1px solid var(--gold);
-    border-radius: 3px;
-    font-family: inherit;
-  }
-
-  .auth-row {
-    display: flex;
-    gap: 8px;
-  }
-  .auth-row button { margin-bottom: 0; }
-
-  .join-row {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-  .join-row input { margin-bottom: 0; flex: 1; }
-  .join-row button { width: auto; margin-bottom: 0; white-space: nowrap; }
-
-  .side-pref-row {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 10px;
-    font-size: 13px;
-  }
-  .side-pref-row label {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    cursor: pointer;
-  }
-  .side-pref-row input[type="radio"] {
-    width: auto;
-    margin: 0;
-  }
-
-  #lobby-list, #game-list {
-    list-style: none;
-    margin: 10px 0 0;
-    padding: 0;
-    max-height: 220px;
-    overflow-y: auto;
-    font-size: 13px;
-  }
-  #lobby-list li.lobby-row, #game-list li.lobby-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 0;
-    border-bottom: 1px solid rgba(184, 148, 75, 0.25);
-  }
-  #lobby-list li.lobby-row:last-child, #game-list li.lobby-row:last-child { border-bottom: none; }
-  #lobby-list li.lobby-row button, #game-list li.lobby-row button {
-    width: auto;
-    margin-bottom: 0;
-    padding: 4px 10px;
-    font-size: 12px;
-    white-space: nowrap;
-  }
-  #lobby-list li.lobby-empty, #game-list li.lobby-empty {
-    opacity: 0.7;
-    padding: 6px 0;
-  }
-
-  #auth-status {
-    font-size: 13px;
-    margin-bottom: 10px;
-    color: var(--parchment-light);
-    opacity: 0.9;
-  }
-  #auth-status .username {
-    color: var(--gold);
-    font-weight: 700;
-  }
-
-  button {
-    width: 100%;
-    padding: 9px 10px;
-    margin-bottom: 8px;
-    font-size: 14px;
-    background: var(--parchment-light);
-    color: var(--ink);
-    border: 1px solid var(--gold);
-    border-radius: 3px;
-    cursor: pointer;
-    font-family: inherit;
-  }
-  button:last-child { margin-bottom: 0; }
-  button:hover { background: var(--gold); }
-  button:focus-visible {
-    outline: 2px solid var(--jade);
-    outline-offset: 2px;
-  }
-
-  #history-log {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    max-height: 260px;
-    overflow-y: auto;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: 13px;
-    line-height: 1.6;
-  }
-  #history-log li { color: var(--parchment-light); opacity: 0.9; }
-  #history-log li span.num { color: var(--gold); margin-right: 6px; }
-
   #message-line {
-    font-size: 18px;
+    font-size: 15px;
     font-weight: 600;
-    min-height: 24px;
+    min-height: 22px;
     color: var(--gold);
-    margin-top: 10px;
+    margin-top: 6px;
     text-align: center;
   }
 
-  .game-info {
-    font-size: 13px;
-    line-height: 1.8;
+  #result-panel {
+    display: none;
+    text-align: center;
+    margin-top: 4px;
   }
-  .game-info .row {
-    display: flex;
-    justify-content: space-between;
-  }
-  .clock {
-    font-family: Consolas, "Courier New", monospace;
+  #result-panel .result-text {
+    font-size: 16px;
     font-weight: 700;
-    font-size: 15px;
+    color: var(--gold);
+    margin-bottom: 8px;
   }
-  .clock.low { color: var(--cinnabar); }
+  #result-panel .result-actions { display: flex; gap: 8px; justify-content: center; }
+  #result-panel button {
+    padding: 7px 16px; font-size: 13px;
+    background: var(--parchment-light); color: var(--ink);
+    border: 1px solid var(--gold); border-radius: 3px; cursor: pointer;
+  }
+
+  #waiting-panel {
+    display: none;
+    text-align: center;
+    margin-top: 8px;
+    padding: 10px 16px;
+    border: 1px solid var(--gold);
+    border-radius: 4px;
+    background: var(--gold-soft);
+  }
+  #waiting-panel button {
+    margin-top: 8px;
+    padding: 8px 18px;
+    background: var(--gold);
+    color: var(--ink);
+    border: none;
+    border-radius: 3px;
+    font-weight: 700;
+    cursor: pointer;
+  }
 
   #replay-bar {
     display: none;
     margin-top: 10px;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    justify-content: center;
+    gap: 10px;
+    font-size: 13px;
   }
-  #replay-bar button { width: auto; margin-bottom: 0; }
+  #replay-bar button {
+    padding: 6px 12px; background: var(--parchment-light); color: var(--ink);
+    border: 1px solid var(--gold); border-radius: 3px; cursor: pointer;
+  }
+
+  /* ------------------------------------------------------------ */
+  /* 右栏：对局信息 + 聊天室                                            */
+  /* ------------------------------------------------------------ */
+  .game-info-card .row {
+    display: flex; justify-content: space-between;
+    font-size: 13px; padding: 3px 0;
+  }
+  .game-info-card .tc-line {
+    font-size: 15px; font-weight: 700; color: var(--gold);
+    margin-bottom: 8px;
+  }
+  .game-info-card .player-line {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; padding: 3px 0;
+  }
+  .side-flag { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .side-flag.black { background: var(--cinnabar); }
+  .side-flag.white { background: var(--jade); }
+
+  .chat-card { display: flex; flex-direction: column; height: 340px; }
+  .chat-card h2 { flex-shrink: 0; }
+  #chat-messages {
+    flex: 1; overflow-y: auto; font-size: 13px; line-height: 1.6;
+    margin-bottom: 8px; opacity: 0.85;
+  }
+  #chat-messages .empty-note { opacity: 0.6; font-size: 12px; }
+  #chat-input-row { display: flex; gap: 6px; }
+  #chat-input {
+    flex: 1; padding: 7px 8px; font-size: 13px;
+    background: var(--parchment-light); color: var(--ink);
+    border: 1px solid var(--gold); border-radius: 3px;
+  }
+  #chat-input:disabled { opacity: 0.5; cursor: not-allowed; }
+  #chat-input-row button {
+    padding: 7px 12px; background: var(--parchment-light); color: var(--ink);
+    border: 1px solid var(--gold); border-radius: 3px; cursor: not-allowed; opacity: 0.5;
+  }
+
+  .account-mini {
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .account-mini input {
+    padding: 6px 8px; font-size: 13px;
+    background: var(--parchment-light); color: var(--ink);
+    border: 1px solid var(--gold); border-radius: 3px;
+  }
+  .account-mini .row-btns { display: flex; gap: 6px; }
+  .account-mini button {
+    flex: 1; padding: 6px 0; font-size: 12px;
+    background: var(--parchment-light); color: var(--ink);
+    border: 1px solid var(--gold); border-radius: 3px; cursor: pointer;
+  }
+
+  @media (max-width: 1000px) {
+    .table-layout { flex-direction: column; align-items: center; }
+    .side-col { width: 100%; max-width: 520px; }
+  }
 </style>
 </head>
 <body>
 
-<header>
-  <h1><a href="index.html" style="color:inherit; text-decoration:none;">古 戰 棋 &nbsp; ARKATANA</a></h1>
-  <div class="subtitle"><a href="index.html" style="color:var(--gold); text-decoration:none;">← 返回主页</a></div>
-  <div id="status-bar">
-    <span class="status-chip side-tag"><span class="side-dot black"></span>黑方（先手）</span>
-    <span class="status-chip side-tag"><span class="side-dot white"></span>白方（后手）</span>
-    <span class="status-chip" id="turn-chip">加载中…</span>
-    <span class="status-chip" id="result-chip"></span>
-    <span class="status-chip" id="game-id-chip">对局: -</span>
+<header class="top-bar">
+  <a class="brand" href="index.html">古 戰 棋　ARKATANA</a>
+  <div class="right-info">
+    <span id="auth-status-mini">未登录</span>
+    <span id="game-id-chip">对局: -</span>
   </div>
 </header>
 
-<main>
-  <div id="board-wrap">
-    <canvas id="board" width="696" height="752"></canvas>
-  </div>
+<div class="table-layout">
 
-  <aside class="panel">
-    <div class="card">
-      <h2>账号</h2>
-      <div id="auth-status">未登录（可以匿名对局）</div>
-      <input type="text" id="auth-username" placeholder="用户名" autocomplete="username">
-      <input type="password" id="auth-password" placeholder="密码" autocomplete="current-password">
-      <div class="auth-row">
-        <button id="btn-login">登录</button>
-        <button id="btn-register">注册</button>
+  <!-- 左栏：对方信息、走子记录、操作按钮、我方信息 -->
+  <aside class="side-col">
+    <div class="player-card" id="player-card-top">
+      <div class="name-row">
+        <span class="name" id="top-name">-</span>
+        <span class="rating" id="top-rating"></span>
       </div>
-      <button id="btn-logout" style="display:none; margin-top:8px;">登出</button>
+      <div class="clock-box" id="top-clock">
+        <span class="time">--:--</span>
+        <span class="increment"></span>
+      </div>
     </div>
-    <div class="card">
-      <h2>对局信息</h2>
-      <div id="game-info" class="game-info"></div>
-      <button id="btn-start-game" style="display:none; margin-top:8px;">▶ 进入并开始对局</button>
-    </div>
-    <div class="card">
-      <h2>对局控制</h2>
-      <button id="btn-undo">悔棋</button>
-      <button id="btn-resign">当前方认输</button>
-    </div>
-    <div class="card">
-      <h2>走子记录</h2>
+
+    <div class="move-list-card">
       <ul id="history-log"></ul>
     </div>
-  </aside>
-</main>
 
-<div id="message-line"></div>
-<div id="replay-bar">
-  <button id="btn-replay-prev">◀ 上一步</button>
-  <span id="replay-position-label">- / -</span>
-  <button id="btn-replay-next">下一步 ▶</button>
-  <button id="btn-replay-exit">退出复盘</button>
+    <div class="action-row">
+      <div class="action-btn-wrap" id="action-undo">
+        <button class="icon-btn" id="btn-undo" title="悔棋">↺</button>
+        <button class="cancel-x" id="cancel-undo">✕</button>
+      </div>
+      <div class="action-btn-wrap" id="action-draw">
+        <button class="icon-btn" id="btn-draw" title="提和">=</button>
+        <button class="cancel-x" id="cancel-draw">✕</button>
+        <div class="badge-soon">协商功能开发中</div>
+      </div>
+      <div class="action-btn-wrap" id="action-resign">
+        <button class="icon-btn" id="btn-resign" title="认输">⚑</button>
+        <button class="cancel-x" id="cancel-resign">✕</button>
+      </div>
+    </div>
+
+    <div class="offer-banner" id="offer-banner"></div>
+
+    <div class="player-card" id="player-card-bottom">
+      <div class="name-row">
+        <span class="name" id="bottom-name">-</span>
+        <span class="rating" id="bottom-rating"></span>
+      </div>
+      <div class="clock-box" id="bottom-clock">
+        <span class="time">--:--</span>
+        <span class="increment"></span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 中栏：棋盘 -->
+  <div class="center-col">
+    <div class="captured-row" id="captured-top"></div>
+    <div id="board-wrap">
+      <canvas id="board" width="696" height="752"></canvas>
+    </div>
+    <div class="captured-row" id="captured-bottom"></div>
+
+    <div id="message-line"></div>
+
+    <div id="waiting-panel">
+      <div>对局尚未开始，等待对手加入…</div>
+      <button id="btn-start-game">▶ 进入并开始对局</button>
+    </div>
+
+    <div id="result-panel">
+      <div class="result-text" id="result-text"></div>
+      <div class="result-actions">
+        <button id="btn-game-review">Game review</button>
+      </div>
+    </div>
+
+    <div id="replay-bar">
+      <button id="btn-replay-prev">◀ 上一步</button>
+      <span id="replay-position-label">- / -</span>
+      <button id="btn-replay-next">下一步 ▶</button>
+      <button id="btn-replay-exit">退出复盘</button>
+    </div>
+  </div>
+
+  <!-- 右栏：对局信息 + 聊天室 -->
+  <aside class="side-col">
+    <div class="card game-info-card">
+      <h2>对局信息</h2>
+      <div class="tc-line" id="tc-line">- </div>
+      <div class="player-line"><span class="side-flag black"></span><span id="info-black-name">-</span></div>
+      <div class="player-line"><span class="side-flag white"></span><span id="info-white-name">-</span></div>
+    </div>
+
+    <div class="card chat-card">
+      <h2>Chatroom</h2>
+      <div id="chat-messages"><div class="empty-note">聊天功能开发中，暂不可用</div></div>
+      <div id="chat-input-row">
+        <input type="text" id="chat-input" placeholder="发送消息…" disabled>
+        <button disabled>发送</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>账号</h2>
+      <div class="account-mini" id="account-mini">
+        <div id="auth-status">未登录（可以匿名对局）</div>
+        <input type="text" id="auth-username" placeholder="用户名" autocomplete="username">
+        <input type="password" id="auth-password" placeholder="密码" autocomplete="current-password">
+        <div class="row-btns">
+          <button id="btn-login">登录</button>
+          <button id="btn-register">注册</button>
+        </div>
+        <button id="btn-logout" style="display:none;">登出</button>
+      </div>
+    </div>
+  </aside>
+
 </div>
 
 <script>
@@ -355,42 +548,56 @@
     cinnabar: "#a6362b",
     jade: "#3f6656",
     gold: "#b8944b",
+    lastMove: "rgba(184, 148, 75, 0.38)",
+    checkGlow: "rgba(196, 45, 45, 0.55)",
   };
+
+  // 棋子记谱字母 -> 中文符号（跟 pieces.py 的 symbol 保持一致），吃子栏用
+  const PIECE_SYMBOLS = { "": "兵", B: "弩", T: "炮", A: "将", H: "轻", N: "重", R: "塔", P: "凤", S: "剑", C: "战" };
+  // 吃子展示顺序：Rook-Ares-Phoenix-Knight-Turret-Chariot-Hussar-Ballista-Swordsman-Pawns
+  const CAPTURE_ORDER = ["R", "A", "P", "N", "T", "C", "H", "B", "S", ""];
+  const STARTING_COUNTS = { R: 2, A: 1, P: 2, N: 2, T: 2, C: 2, H: 2, B: 2, S: 2, "": 11 };
 
   // -------------------------------------------------------------------
   // 状态
   // -------------------------------------------------------------------
   let gameId = null;
-  let boardState = {};      // { "d5": {piece, symbol, side, promoted}, ... }
+  let boardState = {};
   let currentSide = "black";
   let gameResult = "ongoing";
-  let selected = null;      // 当前选中的坐标字符串，例如 "d5"
-  let legalDestinations = []; // 选中棋子的合法目的地坐标字符串数组
-  let historyEntries = [];  // 记谱字符串数组
-  let boardFlipped = false; // 当前登录用户是这局的白方时为 true，整个棋盘转180度显示
+  let selected = null;
+  let legalDestinations = [];
+  let historyEntries = [];
+  let boardFlipped = false;
+  let mySide = null;          // "black" | "white" | null（我在这局里是哪一方；null=旁观/身份未知）
+  let inCheck = false;
+  let lastMoveFrom = null;
+  let lastMoveTo = null;
+  let armedAction = null;     // "undo" | "draw" | "resign" | null
 
-  // 复盘相关状态
   let replayMode = false;
   let replaySteps = [];
   let replayIndex = -1;
 
-  // 登录状态：token 存在 localStorage 里，刷新页面不会掉登录
   let authToken = localStorage.getItem("arkatana_token") || null;
   let authUsername = localStorage.getItem("arkatana_username") || null;
 
   const authStatusEl = document.getElementById("auth-status");
+  const authStatusMiniEl = document.getElementById("auth-status-mini");
   const authUsernameInput = document.getElementById("auth-username");
   const authPasswordInput = document.getElementById("auth-password");
   const btnLogin = document.getElementById("btn-login");
   const btnRegister = document.getElementById("btn-register");
   const btnLogout = document.getElementById("btn-logout");
 
-  const statusEl = document.getElementById("turn-chip");
-  const resultEl = document.getElementById("result-chip");
   const gameIdChip = document.getElementById("game-id-chip");
   const messageEl = document.getElementById("message-line");
   const historyEl = document.getElementById("history-log");
-  const gameInfoEl = document.getElementById("game-info");
+  const waitingPanelEl = document.getElementById("waiting-panel");
+  const resultPanelEl = document.getElementById("result-panel");
+  const resultTextEl = document.getElementById("result-text");
+
+  const ratingCache = {};
 
   // -------------------------------------------------------------------
   // 坐标 <-> 像素 转换
@@ -414,13 +621,19 @@
     return COLS[col] + row;
   }
 
+  function squareToPixelCenter(sq) {
+    const col = colIndex(sq[0]);
+    const row = parseInt(sq.slice(1), 10);
+    const [x, y] = squareTopLeft(col, row);
+    return [x + CELL / 2, y + CELL / 2];
+  }
+
   // -------------------------------------------------------------------
   // 绘制
   // -------------------------------------------------------------------
   function drawBoard() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 棋盘格子（浅/深宣纸色交替，便于辨认网格）
     for (let row = MIN_ROW; row <= MAX_ROW; row++) {
       for (let c = 0; c < COLS.length; c++) {
         const [x, y] = squareTopLeft(c, row);
@@ -428,6 +641,18 @@
         ctx.fillStyle = isDark ? COLORS.parchDark : COLORS.parchLight;
         ctx.fillRect(x, y, CELL, CELL);
       }
+    }
+
+    // 上一步棋高亮（起点+终点，低饱和金色）
+    if (lastMoveFrom) fillSquare(lastMoveFrom, COLORS.lastMove);
+    if (lastMoveTo) fillSquare(lastMoveTo, COLORS.lastMove);
+
+    // 将军红光：找到当前行棋方的王城格子
+    if (inCheck) {
+      const throneSq = Object.entries(boardState).find(
+        ([, info]) => info.piece === "TH" && info.side === currentSide
+      );
+      if (throneSq) drawCheckGlow(throneSq[0]);
     }
 
     // 网格线
@@ -464,29 +689,36 @@
       ctx.fillText(String(row), MARGIN - 10, y + CELL / 2);
     }
 
-    // 选中格 & 合法目的地高亮
-    if (selected) {
-      highlightSquare(selected, COLORS.gold, 3);
-    }
+    if (selected) highlightSquare(selected, COLORS.gold, 3);
     legalDestinations.forEach((sq) => {
       const occupied = !!boardState[sq];
       drawMoveHint(sq, occupied);
     });
 
-    // 四角战旗式装饰线（signature 元素）
     drawCornerBrackets();
 
-    // 棋子
     Object.entries(boardState).forEach(([sq, info]) => {
       drawPiece(sq, info);
     });
   }
 
-  function squareToPixelCenter(sq) {
+  function fillSquare(sq, color) {
     const col = colIndex(sq[0]);
     const row = parseInt(sq.slice(1), 10);
     const [x, y] = squareTopLeft(col, row);
-    return [x + CELL / 2, y + CELL / 2];
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, CELL, CELL);
+  }
+
+  function drawCheckGlow(sq) {
+    const [cx, cy] = squareToPixelCenter(sq);
+    const grad = ctx.createRadialGradient(cx, cy, CELL * 0.15, cx, cy, CELL * 1.1);
+    grad.addColorStop(0, COLORS.checkGlow);
+    grad.addColorStop(1, "rgba(196, 45, 45, 0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, CELL * 1.1, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   function highlightSquare(sq, color, width) {
@@ -528,6 +760,8 @@
     ctx.stroke();
 
     if (info.promoted) {
+      // 占位规则：升变棋子暂时统一用金色描边标记；
+      // 正式版将区分为 白棋升变→金色 / 黑棋升变→铜色（棋子美术定稿后一起换上）
       ctx.beginPath();
       ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
       ctx.strokeStyle = COLORS.gold;
@@ -563,20 +797,51 @@
   }
 
   // -------------------------------------------------------------------
-  // 状态栏 / 历史记录 渲染
+  // 吃子栏
   // -------------------------------------------------------------------
-  function renderStatus() {
-    statusEl.textContent = "当前行棋: " + (currentSide === "black" ? "黑方" : "白方");
-    const resultLabels = {
-      ongoing: "",
-      black_wins: "🏁 黑方胜",
-      white_wins: "🏁 白方胜",
-    };
-    resultEl.textContent = resultLabels[gameResult] || gameResult;
-    resultEl.classList.toggle("has-result", gameResult !== "ongoing");
-    gameIdChip.textContent = "对局: " + (gameId || "-");
+  function computeCaptured(board) {
+    const onBoard = { black: {}, white: {} };
+    Object.values(board).forEach((info) => {
+      if (info.piece === "TH") return;
+      const key = info.piece || "";
+      onBoard[info.side][key] = (onBoard[info.side][key] || 0) + 1;
+    });
+    const capturedByBlack = [];
+    const capturedByWhite = [];
+    CAPTURE_ORDER.forEach((type) => {
+      const start = STARTING_COUNTS[type];
+      const whiteLeft = onBoard.white[type] || 0;
+      const blackLeft = onBoard.black[type] || 0;
+      for (let i = 0; i < start - whiteLeft; i++) capturedByBlack.push(type);
+      for (let i = 0; i < start - blackLeft; i++) capturedByWhite.push(type);
+    });
+    return { black: capturedByBlack, white: capturedByWhite };
   }
 
+  function renderCapturedRow(elId, pieces, capturedSide) {
+    const el = document.getElementById(elId);
+    el.innerHTML = "";
+    pieces.forEach((type) => {
+      const chip = document.createElement("div");
+      chip.className = "piece-chip " + capturedSide + (type === "" ? " pawn-chip" : "");
+      chip.textContent = PIECE_SYMBOLS[type];
+      chip.title = PIECE_SYMBOLS[type];
+      el.appendChild(chip);
+    });
+  }
+
+  function renderCaptured() {
+    const captured = computeCaptured(boardState);
+    const topSide = boardFlipped ? "black" : "white";
+    const bottomSide = boardFlipped ? "white" : "black";
+    // 顶部一栏显示"顶部玩家吃掉的棋子"（也就是对方阵营颜色的棋子）
+    renderCapturedRow("captured-top", captured[topSide], topSide === "black" ? "white" : "black");
+    renderCapturedRow("captured-bottom", captured[bottomSide], bottomSide === "black" ? "white" : "black");
+  }
+
+  // -------------------------------------------------------------------
+  // 走子记录
+  // -------------------------------------------------------------------
   function renderHistory() {
     historyEl.innerHTML = "";
     for (let i = 0; i < historyEntries.length; i += 2) {
@@ -584,14 +849,87 @@
       const black = historyEntries[i] || "";
       const white = historyEntries[i + 1] || "";
       const li = document.createElement("li");
-      li.innerHTML = `<span class="num">${num}.</span>${black}   ${white}`;
+      li.innerHTML = `<span class="num">${num}.</span><span class="mv">${black}</span><span class="mv">${white}</span>`;
       historyEl.appendChild(li);
     }
-    historyEl.scrollTop = historyEl.scrollHeight;
+    historyEl.parentElement.scrollTop = historyEl.parentElement.scrollHeight;
   }
 
   // -------------------------------------------------------------------
-  // 复盘（大厅、历史对局列表已经搬到主页，这里只保留"根据URL参数直接复盘"的能力）
+  // 操作按钮：悔棋 / 和棋 / 认输（点击→高亮+"×" → 再点确认；点"×"取消）
+  // -------------------------------------------------------------------
+  function renderActionButtons() {
+    ["undo", "draw", "resign"].forEach((a) => {
+      document.getElementById("action-" + a).classList.toggle("armed", armedAction === a);
+    });
+    // rated 对局禁用悔棋
+    document.getElementById("action-undo").classList.toggle("disabled-action", !!currentStateRated);
+  }
+
+  function armOrConfirm(action, confirmFn) {
+    if (armedAction === action) {
+      armedAction = null;
+      renderActionButtons();
+      confirmFn();
+    } else {
+      armedAction = action;
+      renderActionButtons();
+    }
+  }
+
+  function disarm() {
+    armedAction = null;
+    renderActionButtons();
+  }
+
+  let currentStateRated = false;
+
+  document.getElementById("btn-undo").addEventListener("click", () => {
+    if (currentStateRated) return; // rated 对局不能悔棋
+    armOrConfirm("undo", confirmUndo);
+  });
+  document.getElementById("cancel-undo").addEventListener("click", (e) => { e.stopPropagation(); disarm(); });
+
+  document.getElementById("btn-draw").addEventListener("click", () => {
+    armOrConfirm("draw", confirmDraw);
+  });
+  document.getElementById("cancel-draw").addEventListener("click", (e) => { e.stopPropagation(); disarm(); });
+
+  document.getElementById("btn-resign").addEventListener("click", () => {
+    armOrConfirm("resign", confirmResign);
+  });
+  document.getElementById("cancel-resign").addEventListener("click", (e) => { e.stopPropagation(); disarm(); });
+
+  async function confirmUndo() {
+    try {
+      const state = await apiPost(`/games/${gameId}/undo`);
+      handleIncomingState(state);
+      setMessage("已悔棋。");
+    } catch (err) {
+      setMessage("悔棋失败：" + err.message);
+    }
+  }
+
+  function confirmDraw() {
+    // 和棋协商（发起申请 -> 对方同意/拒绝 -> 60秒冷却）是独立的后端功能，还没有接入，
+    // 这里先如实告知，不假装真的发送了申请
+    setMessage("和棋协商功能正在开发中，暂时还不能真的发起提和。");
+  }
+
+  async function confirmResign() {
+    if (gameResult !== "ongoing") { setMessage("对局已结束"); return; }
+    if (!mySide) { setMessage("你不是这局对局的玩家，无法认输"); return; }
+    try {
+      const state = await apiPost(`/games/${gameId}/resign`, { side: mySide });
+      handleIncomingState(state);
+      setMessage((mySide === "black" ? "黑方" : "白方") + "已认输。");
+    } catch (err) {
+      setMessage("操作失败：" + err.message);
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // 复盘
   // -------------------------------------------------------------------
   const replayBarEl = document.getElementById("replay-bar");
   const replayPositionLabelEl = document.getElementById("replay-position-label");
@@ -602,11 +940,7 @@
       setMessage(`对局 ${id} 还没有任何走子记录，无法复盘。`);
       return;
     }
-    if (socket) {
-      socket.onclose = null;
-      socket.close();
-      socket = null;
-    }
+    if (socket) { socket.onclose = null; socket.close(); socket = null; }
     replayMode = true;
     replaySteps = data.steps;
     replayIndex = replaySteps.length - 1;
@@ -619,13 +953,16 @@
   function showReplayStep() {
     const step = replaySteps[replayIndex];
     boardState = step.board;
-    currentSide = step.side; // 记录的是"走这步棋的一方"，直接标注更直观
+    currentSide = step.side;
     gameResult = "ongoing";
-    boardFlipped = false; // 复盘固定用黑方视角，简单起见
+    boardFlipped = false;
     selected = null;
     legalDestinations = [];
-    renderStatus();
+    lastMoveFrom = null;
+    lastMoveTo = null;
+    inCheck = false;
     drawBoard();
+    renderCaptured();
     replayPositionLabelEl.textContent = `第 ${replayIndex + 1} / ${replaySteps.length} 步：${step.notation}`;
   }
 
@@ -638,24 +975,17 @@
   }
 
   document.getElementById("btn-replay-prev").addEventListener("click", () => {
-    if (replayIndex > 0) {
-      replayIndex--;
-      showReplayStep();
-    }
+    if (replayIndex > 0) { replayIndex--; showReplayStep(); }
   });
-
   document.getElementById("btn-replay-next").addEventListener("click", () => {
-    if (replayIndex < replaySteps.length - 1) {
-      replayIndex++;
-      showReplayStep();
-    }
+    if (replayIndex < replaySteps.length - 1) { replayIndex++; showReplayStep(); }
+  });
+  document.getElementById("btn-replay-exit").addEventListener("click", exitReplay);
+  document.getElementById("btn-game-review").addEventListener("click", () => {
+    window.location.href = `game.html?replay=${gameId}`;
   });
 
-  document.getElementById("btn-replay-exit").addEventListener("click", exitReplay);
-
-  function setMessage(text) {
-    messageEl.textContent = text || "";
-  }
+  function setMessage(text) { messageEl.textContent = text || ""; }
 
   // -------------------------------------------------------------------
   // WebSocket 实时同步
@@ -663,21 +993,11 @@
   let socket = null;
 
   function connectSocket(id) {
-    if (socket) {
-      socket.onclose = null; // 避免旧连接关闭时触发不必要的提示
-      socket.close();
-      socket = null;
-    }
+    if (socket) { socket.onclose = null; socket.close(); socket = null; }
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     socket = new WebSocket(`${protocol}//${location.host}/ws/games/${id}`);
-
-    socket.onmessage = (event) => {
-      const state = JSON.parse(event.data);
-      handleIncomingState(state);
-    };
-    socket.onerror = () => {
-      setMessage("实时连接出现问题，如果对方走棋后棋盘没反应，试试刷新页面。");
-    };
+    socket.onmessage = (event) => handleIncomingState(JSON.parse(event.data));
+    socket.onerror = () => setMessage("实时连接出现问题，如果对方走棋后棋盘没反应，试试刷新页面。");
   }
 
   function syncHistory(state) {
@@ -693,27 +1013,34 @@
     syncHistory(state);
     selected = null;
     legalDestinations = [];
+    disarm();
     applyState(state);
   }
 
   // -------------------------------------------------------------------
   // 后端交互
   // -------------------------------------------------------------------
+  function getGuestId() {
+    let id = localStorage.getItem("arkatana_guest_id");
+    if (!id) {
+      id = "guest-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      localStorage.setItem("arkatana_guest_id", id);
+    }
+    return id;
+  }
+  const GUEST_ID = getGuestId();
+
   async function apiPost(path, body) {
-    const headers = { "Content-Type": "application/json" };
+    const headers = { "Content-Type": "application/json", "X-Guest-Id": GUEST_ID };
     if (authToken) headers["X-Auth-Token"] = authToken;
-    const res = await fetch(path, {
-      method: "POST",
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const res = await fetch(path, { method: "POST", headers, body: body ? JSON.stringify(body) : undefined });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "请求失败");
     return data;
   }
 
   async function apiGet(path) {
-    const headers = {};
+    const headers = { "X-Guest-Id": GUEST_ID };
     if (authToken) headers["X-Auth-Token"] = authToken;
     const res = await fetch(path, { headers });
     const data = await res.json();
@@ -721,9 +1048,22 @@
     return data;
   }
 
+  async function fetchRating(username) {
+    if (!username) return null;
+    if (ratingCache[username]) return ratingCache[username];
+    try {
+      const data = await apiGet(`/users/${encodeURIComponent(username)}/rating`);
+      ratingCache[username] = data;
+      return data;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function renderAuthStatus() {
     if (authUsername) {
-      authStatusEl.innerHTML = `已登录：<span class="username">${authUsername}</span>`;
+      authStatusEl.innerHTML = `已登录：<b style="color:var(--gold)">${authUsername}</b>`;
+      authStatusMiniEl.textContent = authUsername;
       authUsernameInput.style.display = "none";
       authPasswordInput.style.display = "none";
       btnLogin.style.display = "none";
@@ -731,6 +1071,7 @@
       btnLogout.style.display = "block";
     } else {
       authStatusEl.textContent = "未登录（可以匿名对局）";
+      authStatusMiniEl.textContent = "未登录";
       authUsernameInput.style.display = "block";
       authPasswordInput.style.display = "block";
       btnLogin.style.display = "block";
@@ -755,40 +1096,30 @@
   btnLogin.addEventListener("click", async () => {
     const username = authUsernameInput.value.trim();
     const password = authPasswordInput.value;
-    if (!username || !password) {
-      setMessage("请输入用户名和密码");
-      return;
-    }
+    if (!username || !password) { setMessage("请输入用户名和密码"); return; }
     try {
       const data = await apiPost("/login", { username, password });
       setAuth(data.token, data.username);
       authPasswordInput.value = "";
       setMessage(`登录成功，欢迎 ${data.username}`);
-    } catch (err) {
-      setMessage("登录失败：" + err.message);
-    }
+    } catch (err) { setMessage("登录失败：" + err.message); }
   });
 
   btnRegister.addEventListener("click", async () => {
     const username = authUsernameInput.value.trim();
     const password = authPasswordInput.value;
-    if (!username || !password) {
-      setMessage("请输入用户名和密码");
-      return;
-    }
+    if (!username || !password) { setMessage("请输入用户名和密码"); return; }
     try {
       const data = await apiPost("/register", { username, password });
       setMessage(`注册成功（${data.username}），现在可以登录了`);
-    } catch (err) {
-      setMessage("注册失败：" + err.message);
-    }
+    } catch (err) { setMessage("注册失败：" + err.message); }
   });
 
-  btnLogout.addEventListener("click", () => {
-    setAuth(null, null);
-    setMessage("已登出");
-  });
+  btnLogout.addEventListener("click", () => { setAuth(null, null); setMessage("已登出"); });
 
+  // -------------------------------------------------------------------
+  // 棋钟
+  // -------------------------------------------------------------------
   let clockState = { blackTime: null, whiteTime: null, timeControl: null, syncedAt: null };
 
   function formatClock(seconds) {
@@ -799,24 +1130,6 @@
     return `${m}:${String(s).padStart(2, "0")}`;
   }
 
-  function renderGameInfo(state) {
-    const blackName = state.black_player || "匿名";
-    const whiteName = state.white_player || "匿名";
-    const modeLabel = state.rated ? "Rated" : "Casual";
-    const tcLabel = state.time_control
-      ? `${state.time_control.minutes_per_side}+${state.time_control.increment_seconds}`
-      : "无时间限制";
-
-    gameInfoEl.innerHTML = `
-      <div class="row"><span>黑方</span><span>${blackName}</span></div>
-      <div class="row"><span>白方</span><span>${whiteName}</span></div>
-      <div class="row"><span>模式</span><span>${modeLabel}</span></div>
-      <div class="row"><span>时间控制</span><span>${tcLabel}</span></div>
-      <div class="row"><span>黑方剩余</span><span class="clock" id="black-clock">${formatClock(state.black_time)}</span></div>
-      <div class="row"><span>白方剩余</span><span class="clock" id="white-clock">${formatClock(state.white_time)}</span></div>
-    `;
-  }
-
   function tickClocks() {
     if (!clockState.timeControl || gameResult !== "ongoing" || replayMode) return;
     const elapsed = (Date.now() - clockState.syncedAt) / 1000;
@@ -825,39 +1138,101 @@
     if (currentSide === "black") blackDisplay = Math.max(0, clockState.blackTime - elapsed);
     if (currentSide === "white") whiteDisplay = Math.max(0, clockState.whiteTime - elapsed);
 
-    const blackEl = document.getElementById("black-clock");
-    const whiteEl = document.getElementById("white-clock");
-    if (blackEl) {
-      blackEl.textContent = formatClock(blackDisplay);
-      blackEl.classList.toggle("low", blackDisplay < 20);
-    }
-    if (whiteEl) {
-      whiteEl.textContent = formatClock(whiteDisplay);
-      whiteEl.classList.toggle("low", whiteDisplay < 20);
-    }
+    const topSide = boardFlipped ? "black" : "white";
+    const bottomSide = boardFlipped ? "white" : "black";
+    const bySide = { black: blackDisplay, white: whiteDisplay };
+
+    [["top-clock", topSide], ["bottom-clock", bottomSide]].forEach(([elId, side]) => {
+      const el = document.getElementById(elId);
+      const timeEl = el.querySelector(".time");
+      const val = bySide[side];
+      timeEl.textContent = formatClock(val);
+      el.classList.toggle("active", currentSide === side && gameResult === "ongoing");
+      el.classList.toggle("low", val !== null && val < 20);
+    });
   }
   setInterval(tickClocks, 500);
+
+  // -------------------------------------------------------------------
+  // 棋手信息卡 / 对局信息 / 状态整体渲染
+  // -------------------------------------------------------------------
+  async function renderPlayerCards(state) {
+    const topSide = boardFlipped ? "black" : "white";
+    const bottomSide = boardFlipped ? "white" : "black";
+    const nameOf = { black: state.black_player, white: state.white_player };
+
+    const topNameEl = document.getElementById("top-name");
+    const bottomNameEl = document.getElementById("bottom-name");
+    topNameEl.textContent = nameOf[topSide] || "匿名";
+    bottomNameEl.textContent = nameOf[bottomSide] || "匿名";
+
+    document.getElementById("top-clock").querySelector(".increment").textContent =
+      state.time_control ? `+${state.time_control.increment_seconds}s` : "";
+    document.getElementById("bottom-clock").querySelector(".increment").textContent =
+      state.time_control ? `+${state.time_control.increment_seconds}s` : "";
+
+    const topRatingEl = document.getElementById("top-rating");
+    const bottomRatingEl = document.getElementById("bottom-rating");
+    topRatingEl.textContent = "";
+    bottomRatingEl.textContent = "";
+
+    if (nameOf[topSide]) {
+      const r = await fetchRating(nameOf[topSide]);
+      if (r) topRatingEl.textContent = r.rating;
+    }
+    if (nameOf[bottomSide]) {
+      const r = await fetchRating(nameOf[bottomSide]);
+      if (r) bottomRatingEl.textContent = r.rating;
+    }
+  }
+
+  function renderGameInfo(state) {
+    const tcLabel = state.time_control
+      ? `${state.time_control.minutes_per_side}+${state.time_control.increment_seconds}　${state.rated ? "rated" : "casual"}`
+      : (state.rated ? "无时间限制　rated" : "无时间限制　casual");
+    document.getElementById("tc-line").textContent = tcLabel;
+    document.getElementById("info-black-name").textContent = state.black_player || "匿名";
+    document.getElementById("info-white-name").textContent = state.white_player || "匿名";
+  }
+
+  function renderResultPanel(state) {
+    if (state.result === "ongoing") {
+      resultPanelEl.style.display = "none";
+      return;
+    }
+    const labels = { black_wins: "黑方获胜", white_wins: "白方获胜" };
+    resultTextEl.textContent = labels[state.result] || state.result;
+    resultPanelEl.style.display = "block";
+  }
 
   function applyState(state) {
     boardState = state.board;
     currentSide = state.current_side;
     gameResult = state.result;
-    boardFlipped = !!(authUsername && state.white_player === authUsername);
+    inCheck = !!state.in_check;
+    lastMoveFrom = state.last_move_from || null;
+    lastMoveTo = state.last_move_to || null;
+    currentStateRated = !!state.rated;
+    if (state.my_side !== undefined && state.my_side !== null) mySide = state.my_side;
+    boardFlipped = mySide === "white" || (!mySide && !!(authUsername && state.white_player === authUsername));
+
     clockState = {
       blackTime: state.black_time,
       whiteTime: state.white_time,
       timeControl: state.time_control,
       syncedAt: Date.now(),
     };
-    renderStatus();
-    renderGameInfo(state);
-    drawBoard();
 
-    // 有时间控制、但棋钟还没开始走：说明这局还"晾在大厅里"等第二个人真正进来。
-    // 账号对局靠 /join 自动触发开始，这个按钮主要是给匿名对局用的手动入口。
-    const startBtn = document.getElementById("btn-start-game");
+    drawBoard();
+    renderCaptured();
+    renderGameInfo(state);
+    renderPlayerCards(state);
+    renderActionButtons();
+    renderResultPanel(state);
+    tickClocks();
+
     const stillWaiting = !!state.time_control && !state.clock_started && state.result === "ongoing";
-    startBtn.style.display = stillWaiting ? "block" : "none";
+    waitingPanelEl.style.display = stillWaiting ? "block" : "none";
   }
 
   async function newGame() {
@@ -868,13 +1243,13 @@
     setMessage("正在创建新对局…");
     const state = await apiPost("/games", {});
     gameId = state.game_id;
+    gameIdChip.textContent = "对局: " + gameId;
     applyState(state);
     connectSocket(gameId);
     setMessage("新对局已开始，黑方先行。");
   }
 
   function parseHistoryText(text) {
-    // 把 "1. Ba1xe5   d5-d7^" 这种记谱文本还原成 ["Ba1xe5", "d5-d7^"] 这样的数组
     const entries = [];
     text.split("\n").forEach((line) => {
       const dotIndex = line.indexOf(".");
@@ -890,6 +1265,7 @@
     setMessage(`正在加载对局 ${id} …`);
     const state = await apiGet(`/games/${id}`);
     gameId = id;
+    gameIdChip.textContent = "对局: " + gameId;
     selected = null;
     legalDestinations = [];
     applyState(state);
@@ -898,38 +1274,27 @@
     try {
       const hist = await apiGet(`/games/${id}/history`);
       historyEntries = parseHistoryText(hist.history);
-    } catch (e) {
-      // 走子记录拉取失败不影响继续下棋，忽略即可
-    }
+    } catch (e) { /* 忽略 */ }
     renderHistory();
     setMessage(`已加载对局 ${id}`);
     connectSocket(gameId);
 
-    // 已登录的话，顺手尝试认领还没人认领的一方；
-    // 认领失败（比如已经是玩家、或者对局已满员）不算错误，静默忽略即可
     if (authToken) {
       try {
         const joined = await apiPost(`/games/${id}/join`);
         applyState(joined);
         setMessage(`已加入对局 ${id}`);
-      } catch (e) {
-        // 忽略
-      }
+      } catch (e) { /* 忽略：可能已经是玩家，或对局已满员 */ }
     }
   }
 
   async function selectSquare(sq) {
     const info = boardState[sq];
     if (!info || info.side !== currentSide) {
-      selected = null;
-      legalDestinations = [];
-      drawBoard();
-      return;
+      selected = null; legalDestinations = []; drawBoard(); return;
     }
     if (info.piece === "TH") {
-      selected = null;
-      legalDestinations = [];
-      drawBoard();
+      selected = null; legalDestinations = []; drawBoard();
       setMessage("王城不可移动");
       return;
     }
@@ -937,11 +1302,7 @@
     selected = sq;
     legalDestinations = data.legal_destinations;
     drawBoard();
-    if (legalDestinations.length === 0) {
-      setMessage(`${sq} 这个棋子当前没有合法走法（可能被将军钉住了）。`);
-    } else {
-      setMessage("");
-    }
+    setMessage(legalDestinations.length === 0 ? `${sq} 这个棋子当前没有合法走法（可能被将军钉住了）。` : "");
   }
 
   async function tryMove(from, to) {
@@ -951,9 +1312,7 @@
       setMessage(`${from} → ${to}：${state.last_move}`);
     } catch (err) {
       setMessage(err.message);
-      selected = null;
-      legalDestinations = [];
-      drawBoard();
+      selected = null; legalDestinations = []; drawBoard();
     }
   }
 
@@ -966,7 +1325,6 @@
     const py = (evt.clientY - rect.top) * scaleY;
     const sq = pixelToSquare(px, py);
     if (!sq) return;
-
     if (selected && legalDestinations.includes(sq)) {
       tryMove(selected, sq);
     } else {
@@ -979,34 +1337,7 @@
       const state = await apiPost(`/games/${gameId}/start`);
       handleIncomingState(state);
       setMessage("对局已开始！");
-    } catch (err) {
-      setMessage("开始对局失败：" + err.message);
-    }
-  });
-
-  document.getElementById("btn-undo").addEventListener("click", async () => {
-    try {
-      const state = await apiPost(`/games/${gameId}/undo`);
-      handleIncomingState(state);
-      setMessage("已悔棋。");
-    } catch (err) {
-      setMessage("悔棋失败：" + err.message);
-    }
-  });
-
-  document.getElementById("btn-resign").addEventListener("click", async () => {
-    if (gameResult !== "ongoing") {
-      setMessage("对局已结束");
-      return;
-    }
-    try {
-      const resigningSide = currentSide;
-      const state = await apiPost(`/games/${gameId}/resign`, { side: resigningSide });
-      handleIncomingState(state);
-      setMessage((resigningSide === "black" ? "黑方" : "白方") + "已认输。");
-    } catch (err) {
-      setMessage("操作失败：" + err.message);
-    }
+    } catch (err) { setMessage("开始对局失败：" + err.message); }
   });
 
   // -------------------------------------------------------------------

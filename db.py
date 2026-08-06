@@ -41,11 +41,12 @@ import secrets
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Float, Boolean, select, or_
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Float, Boolean, UniqueConstraint, select, or_
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from game import Game
-from notation import format_game, board_to_position_string, parse_move_notation
+from board import parse_coord
+from notation import format_game, board_to_position_string, parse_move_notation, move_notation
 import rating as rating_module
 import clock as clock_module
 
@@ -118,6 +119,14 @@ class GameRecord(Base):
     black_time_remaining = Column(Float, nullable=True)
     white_time_remaining = Column(Float, nullable=True)
 
+    # 棋钟是否已经真正开始走（对局是否已经"正式开始"）。
+    # 之所以需要单独存这个字段，而不是靠 black_player/white_player 判断：
+    # 匿名对局的"访客认领"完全是内存里的临时状态，从来不会写进
+    # black_player/white_player 这两个字段——大厅查询只认数据库里的东西，
+    # 所以必须把"是否已经开始"这件事也持久化，大厅才能正确感知到
+    # "匿名对局其实已经凑齐两人了，该从大厅消失了"。
+    clock_started = Column(Boolean, default=False, nullable=False)
+
     # 是否是排位对局；rating_applied 防止评分结算被重复触发
     rated = Column(Boolean, default=False, nullable=False)
     rating_applied = Column(Boolean, default=False, nullable=False)
@@ -134,6 +143,62 @@ class User(Base):
     rating = Column(Integer, default=rating_module.INITIAL_RATING, nullable=False)
     rated_games_played = Column(Integer, default=0, nullable=False)  # 纯统计展示用，不参与保护期判定
     provisional_progress = Column(Float, default=0.0, nullable=False)  # 保护期"已消耗的波动额度"
+
+
+class OAuthAccount(Base):
+    """
+    第三方登录账号关联表：一个 User 可以关联多个第三方账号
+    （比如同一个人既用 Google 登录过，又用 QQ 登录过，理论上可以都指向同一个 User，
+    不过目前的实现是"每种第三方账号第一次登录时都会新建一个独立 User"，
+    账号合并/关联管理是更进一步的功能，这里先只处理"查找/创建"）。
+    """
+    __tablename__ = "oauth_accounts"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="uq_oauth_provider_account"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    provider = Column(String, nullable=False)          # "google" / "facebook" / "qq"
+    provider_user_id = Column(String, nullable=False)  # 第三方平台给的用户唯一ID
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class OpeningNode(Base):
+    """
+    开局库节点：整个开局库是**一棵树**，不是一条条互相独立的棋谱。
+
+    每个节点代表"在某个局面下走出的某一步棋"，节点的子节点就是这步棋之后
+    所有已经录入过的后续变化。比如"天穹弃兵"往下分出"天琴反弃兵"和
+    "格雷夫反弃兵"，在树里就是同一个节点的两个子节点——共享前面的走法，
+    不需要把公共部分重复录入两遍。
+
+    - 根节点（parent_id 为 None）代表初始局面，它没有走法，只有局面。
+    - name 只挂在"这条线开始有名字"的那个节点上，不需要每步都填。
+    - sort_order 决定同一层的兄弟节点在变例列表里的显示顺序，
+      数字小的排前面——用来把主流变例放到上面。
+    - position_text 是"走完这步之后"的局面，冗余存一份是为了浏览时
+      不用每次都从根节点重放一遍，换取查询速度。
+    """
+    __tablename__ = "opening_nodes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    parent_id = Column(Integer, nullable=True, index=True)  # None 表示根节点（初始局面）
+
+    # 走法信息（根节点全部为空）
+    move_notation = Column(String, nullable=True)   # 正式记谱，比如 "Hcf3"
+    from_sq = Column(String, nullable=True)
+    to_sq = Column(String, nullable=True)
+    moved_side = Column(String, nullable=True)      # 走这步的是哪一方："black"/"white"
+
+    position_text = Column(Text, nullable=False)    # 走完这步之后的局面（board_to_position_string）
+
+    name = Column(String, nullable=True)            # 变例名称，可空（比如"天穹弃兵"）
+    comment = Column(Text, nullable=True)           # 备注：评估、Σ标记、说明文字等
+    sort_order = Column(Integer, default=0, nullable=False)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +242,7 @@ def save_game(
     tc_increment = tc.increment_seconds if tc is not None else None
     black_time = game.clock.time_left("black")
     white_time = game.clock.time_left("white")
+    clock_started = (not game.clock.is_unlimited) and (game.clock.active_side is not None)
 
     with factory() as session:
         record = session.execute(
@@ -198,6 +264,7 @@ def save_game(
                 time_control_increment=tc_increment,
                 black_time_remaining=black_time,
                 white_time_remaining=white_time,
+                clock_started=clock_started,
             )
             session.add(record)
         else:
@@ -211,6 +278,7 @@ def save_game(
             record.time_control_increment = tc_increment
             record.black_time_remaining = black_time
             record.white_time_remaining = white_time
+            record.clock_started = clock_started
             if black_player is not None:
                 record.black_player = black_player
             if white_player is not None:
@@ -341,6 +409,24 @@ def game_exists(game_id: str, session_factory=None) -> bool:
     return record is not None
 
 
+def delete_game(game_id: str, session_factory=None) -> bool:
+    """
+    彻底删除一局对局记录（用于"取消房间"——一局还没正式开始、
+    连一步棋都没走过的对局，取消了就没有保留价值）。
+    返回是否真的删除了（对局不存在则返回 False）。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        record = session.execute(
+            select(GameRecord).where(GameRecord.game_id == game_id)
+        ).scalar_one_or_none()
+        if record is None:
+            return False
+        session.delete(record)
+        session.commit()
+        return True
+
+
 def list_recent_games(limit: int = 20, session_factory=None) -> list[dict]:
     """列出最近更新过的对局摘要（内部/管理用途；网页首页的"对局历史"用的是 list_user_games）"""
     factory = session_factory or SessionLocal
@@ -403,13 +489,16 @@ def list_user_games(username: str, limit: int = 20, session_factory=None) -> lis
 def list_open_rooms(limit: int = 20, session_factory=None) -> list[dict]:
     """
     列出"大厅"里还在等待开始的房间：对局仍在进行中（result == 'ongoing'）、
-    还没有任何人走过一步棋（move_count == 0）、而且不是"黑白双方都已经被
-    账号认领"的满员状态。
+    棋钟还没真正开始走（clock_started == False）、还没有任何人走过一步棋
+    （move_count == 0，用于兜底覆盖无时间限制对局——那种对局的
+    clock_started 永远是 False，靠 move_count 判断"是否已经开始"），
+    而且不是"黑白双方都已经被账号认领"的满员状态。
 
     这个判定标准同时覆盖两种情况：
-    - 匿名创建的房间（黑白双方都没绑定账号）：只要还没人走棋，就一直在大厅里等
-    - 账号绑定的房间（一方已认领，等另一方 /join）：同上，且认领方信息用于显示
-    一旦有人走了第一步棋，或者账号房间的黑白双方都凑齐了，就从大厅消失。
+    - 匿名创建的房间：访客认领本身不会写进数据库，但"棋钟开始走了"这件事会——
+      不管是通过 /join 还是 /start 触发，只要棋钟真的开始走，就说明凑齐两人了，
+      从大厅消失。
+    - 账号绑定的房间（一方已认领，等另一方 /join）：同上。
     """
     factory = session_factory or SessionLocal
     with factory() as session:
@@ -418,6 +507,7 @@ def list_open_rooms(limit: int = 20, session_factory=None) -> list[dict]:
             .where(
                 GameRecord.result == "ongoing",
                 GameRecord.move_count == 0,
+                GameRecord.clock_started.is_(False),
                 or_(GameRecord.black_player.is_(None), GameRecord.white_player.is_(None)),
             )
             .order_by(GameRecord.created_at.desc())
@@ -515,6 +605,79 @@ def get_user_by_username(username: str, session_factory=None) -> Optional[User]:
         return session.execute(
             select(User).where(User.username == username)
         ).scalar_one_or_none()
+
+
+# ---------------------------------------------------------------------------
+# 第三方登录相关函数
+# ---------------------------------------------------------------------------
+
+def _generate_unique_username(base: str, session) -> str:
+    """
+    根据建议的用户名（比如邮箱前缀）生成一个不重复的用户名：
+    如果 base 本身没被占用就直接用；被占用了就依次尝试 base1, base2, base3...
+    """
+    base = (base or "player").strip() or "player"
+    candidate = base
+    suffix = 0
+    while session.execute(
+        select(User).where(User.username == candidate)
+    ).scalar_one_or_none() is not None:
+        suffix += 1
+        candidate = f"{base}{suffix}"
+    return candidate
+
+
+def find_user_by_oauth(provider: str, provider_user_id: str, session_factory=None) -> Optional[User]:
+    """查询某个第三方账号是否已经关联过本站用户；没有则返回 None"""
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        link = session.execute(
+            select(OAuthAccount).where(
+                OAuthAccount.provider == provider,
+                OAuthAccount.provider_user_id == provider_user_id,
+            )
+        ).scalar_one_or_none()
+        if link is None:
+            return None
+        return session.execute(
+            select(User).where(User.id == link.user_id)
+        ).scalar_one_or_none()
+
+
+def create_oauth_user(
+    provider: str, provider_user_id: str, suggested_username: str, session_factory=None
+) -> User:
+    """
+    为一个第三方账号新建一个本站用户（第一次用这个第三方账号登录时调用）。
+    这个用户没有可用的密码——存的是一段随机哈希，任何人都不可能靠猜密码登进去，
+    这类账号只能通过对应的第三方登录方式进入。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        username = _generate_unique_username(suggested_username, session)
+        placeholder_password_hash = _hash_password(secrets.token_hex(32))
+        user = User(username=username, password_hash=placeholder_password_hash)
+        session.add(user)
+        session.flush()  # 先拿到 user.id，还没提交事务
+
+        link = OAuthAccount(user_id=user.id, provider=provider, provider_user_id=provider_user_id)
+        session.add(link)
+        session.commit()
+        session.refresh(user)
+        return user
+
+
+def get_or_create_oauth_user(
+    provider: str, provider_user_id: str, suggested_username: str, session_factory=None
+) -> User:
+    """
+    第三方登录的统一入口：账号已经关联过就直接返回对应用户，
+    没有的话自动新建一个（用户名从 suggested_username 派生，重复了会自动加数字）。
+    """
+    existing = find_user_by_oauth(provider, provider_user_id, session_factory=session_factory)
+    if existing is not None:
+        return existing
+    return create_oauth_user(provider, provider_user_id, suggested_username, session_factory=session_factory)
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +788,292 @@ def finalize_rated_game(
 
 
 # ---------------------------------------------------------------------------
+# 开局库（树状变例结构）
+# ---------------------------------------------------------------------------
+
+def _replay_to_node(node_id: Optional[int], session) -> Game:
+    """
+    从根节点一路重放到指定节点，返回那个局面对应的 Game 对象。
+    node_id 为 None 或根节点时，直接返回一局全新的初始对局。
+
+    为什么要重放而不是直接读 position_text：因为要在这个局面上继续走棋
+    （校验合法性、生成记谱），需要一个完整可用的 Game 对象，
+    而 position_text 只是局面快照，不含走子历史，没法直接拿来续走。
+    """
+    # 先从目标节点往上收集到根的路径
+    chain: list[OpeningNode] = []
+    current_id = node_id
+    while current_id is not None:
+        node = session.execute(
+            select(OpeningNode).where(OpeningNode.id == current_id)
+        ).scalar_one_or_none()
+        if node is None:
+            break
+        chain.append(node)
+        current_id = node.parent_id
+    chain.reverse()  # 变成从根到目标的顺序
+
+    game = Game()
+    for node in chain:
+        if node.from_sq is None or node.to_sq is None:
+            continue  # 根节点没有走法，跳过
+        game.make_move(parse_coord(node.from_sq), parse_coord(node.to_sq))
+    return game
+
+
+def ensure_opening_root(session_factory=None) -> int:
+    """
+    确保开局库的根节点（初始局面）存在，返回它的 id。
+    根节点是整棵树的入口，第一次调用时自动创建。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        root = session.execute(
+            select(OpeningNode).where(OpeningNode.parent_id.is_(None))
+        ).scalars().first()
+        if root is not None:
+            return root.id
+
+        fresh = Game()
+        root = OpeningNode(
+            parent_id=None,
+            move_notation=None,
+            from_sq=None,
+            to_sq=None,
+            moved_side=None,
+            position_text=board_to_position_string(fresh.board, fresh.current_side),
+            name="初始局面",
+            sort_order=0,
+        )
+        session.add(root)
+        session.commit()
+        return root.id
+
+
+def _node_to_dict(node: OpeningNode) -> dict:
+    return {
+        "id": node.id,
+        "parent_id": node.parent_id,
+        "move_notation": node.move_notation,
+        "from_sq": node.from_sq,
+        "to_sq": node.to_sq,
+        "moved_side": node.moved_side,
+        "name": node.name,
+        "comment": node.comment,
+        "sort_order": node.sort_order,
+    }
+
+
+def get_opening_node(node_id: int, session_factory=None) -> Optional[dict]:
+    """读取单个开局节点的信息；不存在返回 None"""
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        node = session.execute(
+            select(OpeningNode).where(OpeningNode.id == node_id)
+        ).scalar_one_or_none()
+        return _node_to_dict(node) if node is not None else None
+
+
+def list_opening_children(node_id: int, session_factory=None) -> list[dict]:
+    """
+    列出某个节点下已经录入的所有后续走法（也就是变例列表窗口要显示的内容），
+    按 sort_order 升序排列，同序时按创建时间排。
+    每条会附带 has_children，方便前端显示"这条线下面还有更多变化"。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        children = session.execute(
+            select(OpeningNode)
+            .where(OpeningNode.parent_id == node_id)
+            .order_by(OpeningNode.sort_order.asc(), OpeningNode.id.asc())
+        ).scalars().all()
+
+        result = []
+        for child in children:
+            grandchild_count = len(session.execute(
+                select(OpeningNode.id).where(OpeningNode.parent_id == child.id)
+            ).scalars().all())
+            entry = _node_to_dict(child)
+            entry["has_children"] = grandchild_count > 0
+            result.append(entry)
+        return result
+
+
+def get_opening_path(node_id: int, session_factory=None) -> list[dict]:
+    """
+    返回从根节点到指定节点这一整条路径（不含根节点本身），
+    供界面显示"当前走到哪一条线上了"的面包屑，以及左侧的走法序列。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        chain = []
+        current_id = node_id
+        while current_id is not None:
+            node = session.execute(
+                select(OpeningNode).where(OpeningNode.id == current_id)
+            ).scalar_one_or_none()
+            if node is None:
+                break
+            if node.parent_id is not None:  # 跳过根节点
+                chain.append(_node_to_dict(node))
+            current_id = node.parent_id
+        chain.reverse()
+        return chain
+
+
+def add_opening_move(
+    parent_id: int,
+    from_sq: str,
+    to_sq: str,
+    name: Optional[str] = None,
+    comment: Optional[str] = None,
+    session_factory=None,
+) -> dict:
+    """
+    在指定节点下新增一步棋（也就是录入一个新变例分支）。
+
+    会先重放到父节点局面、校验这步棋合法，再自动生成正式记谱并存下来——
+    所以录入时不需要手打记谱，走一步棋就自动记好，也不可能录进非法走法。
+
+    如果这一步在该节点下已经录过了（同样的起止坐标），不会重复创建，
+    直接返回已有的那个节点（顺便更新名称/备注，如果这次传了的话）。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        parent = session.execute(
+            select(OpeningNode).where(OpeningNode.id == parent_id)
+        ).scalar_one_or_none()
+        if parent is None:
+            raise ValueError(f"找不到父节点: {parent_id}")
+
+        # 已经录过同样这一步就直接复用，避免树上出现重复分支
+        existing = session.execute(
+            select(OpeningNode).where(
+                OpeningNode.parent_id == parent_id,
+                OpeningNode.from_sq == from_sq,
+                OpeningNode.to_sq == to_sq,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            if name is not None:
+                existing.name = name
+            if comment is not None:
+                existing.comment = comment
+            existing.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            return _node_to_dict(existing)
+
+        game = _replay_to_node(parent_id, session)
+        moved_side = game.current_side.value
+        record = game.make_move(parse_coord(from_sq), parse_coord(to_sq))  # 非法走法会抛异常
+
+        # 新分支默认排在同层最后面，之后可以在编辑界面里手动调整顺序
+        sibling_count = len(session.execute(
+            select(OpeningNode.id).where(OpeningNode.parent_id == parent_id)
+        ).scalars().all())
+
+        node = OpeningNode(
+            parent_id=parent_id,
+            move_notation=move_notation(record),
+            from_sq=from_sq,
+            to_sq=to_sq,
+            moved_side=moved_side,
+            position_text=board_to_position_string(game.board, game.current_side),
+            name=name,
+            comment=comment,
+            sort_order=sibling_count,
+        )
+        session.add(node)
+        session.commit()
+        session.refresh(node)
+        return _node_to_dict(node)
+
+
+def update_opening_node(
+    node_id: int,
+    name: Optional[str] = None,
+    comment: Optional[str] = None,
+    sort_order: Optional[int] = None,
+    session_factory=None,
+) -> Optional[dict]:
+    """
+    修改某个节点的名称/备注/排序。只有传了值的字段会被改动，
+    传 None 表示"这个字段不动"。想清空名称请传空字符串 ""。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        node = session.execute(
+            select(OpeningNode).where(OpeningNode.id == node_id)
+        ).scalar_one_or_none()
+        if node is None:
+            return None
+        if name is not None:
+            node.name = name or None
+        if comment is not None:
+            node.comment = comment or None
+        if sort_order is not None:
+            node.sort_order = sort_order
+        node.updated_at = datetime.now(timezone.utc)
+        session.commit()
+        session.refresh(node)
+        return _node_to_dict(node)
+
+
+def reorder_opening_children(parent_id: int, ordered_ids: list[int], session_factory=None) -> None:
+    """
+    重排某个节点下所有子节点的显示顺序——编辑界面里"把主流变例拖到上面"用这个。
+    ordered_ids 按期望的显示顺序传入，函数会据此重写各自的 sort_order。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        for index, node_id in enumerate(ordered_ids):
+            node = session.execute(
+                select(OpeningNode).where(
+                    OpeningNode.id == node_id,
+                    OpeningNode.parent_id == parent_id,
+                )
+            ).scalar_one_or_none()
+            if node is not None:
+                node.sort_order = index
+                node.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+
+def delete_opening_subtree(node_id: int, session_factory=None) -> int:
+    """
+    删除一个节点，连同它下面的整棵子树一起删掉（删掉一条变例时，
+    它派生出的所有后续变化自然也不该留着）。返回一共删了多少个节点。
+    根节点不允许删除。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        node = session.execute(
+            select(OpeningNode).where(OpeningNode.id == node_id)
+        ).scalar_one_or_none()
+        if node is None:
+            return 0
+        if node.parent_id is None:
+            raise ValueError("根节点（初始局面）不能删除")
+
+        # 广度优先收集整棵子树
+        to_delete = [node]
+        frontier = [node.id]
+        while frontier:
+            children = session.execute(
+                select(OpeningNode).where(OpeningNode.parent_id.in_(frontier))
+            ).scalars().all()
+            if not children:
+                break
+            to_delete.extend(children)
+            frontier = [c.id for c in children]
+
+        for n in to_delete:
+            session.delete(n)
+        session.commit()
+        return len(to_delete)
+
+
+# ---------------------------------------------------------------------------
 # 简单自检（使用独立的临时数据库文件，不污染正式的 arkatana.db）
 # ---------------------------------------------------------------------------
 
@@ -656,7 +1105,6 @@ if __name__ == "__main__":
     assert restored.result == game.result
     assert len(restored.move_log) == len(game.move_log)
 
-    from board import parse_coord
     original_piece = game.board.get(parse_coord("d8"))
     restored_piece = restored.board.get(parse_coord("d8"))
     assert type(original_piece) is type(restored_piece)
@@ -749,6 +1197,17 @@ if __name__ == "__main__":
     rooms_after_move = list_open_rooms(limit=50, session_factory=test_session_factory)
     assert "room_anonymous" not in {r["game_id"] for r in rooms_after_move}, \
         "已经开始下棋的房间不应该再出现在大厅"
+
+    # 关键场景：棋钟已经开始走、但还一步棋都没走（模拟匿名对局两个访客都已经
+    # 认领完毕、正式开始计时，但还没轮到任何人真正落子的那个瞬间）——
+    # 这种情况也应该立刻从大厅消失，不能靠"有没有人走棋"这一个指标来判断
+    from clock import TimeControl as _TC
+    game8 = Game(_TC(minutes_per_side=5, increment_seconds=3))
+    game8.start_clocks()
+    save_game("room_clock_started_no_moves", game8, session_factory=test_session_factory)
+    rooms_clock_started = list_open_rooms(limit=50, session_factory=test_session_factory)
+    assert "room_clock_started_no_moves" not in {r["game_id"] for r in rooms_clock_started}, \
+        "棋钟已经开始走的房间，哪怕还没人走过棋，也不应该出现在大厅"
 
     # 9) 个人对局历史：只返回这个用户自己参与过的对局
     farkas_games = list_user_games("farkas", session_factory=test_session_factory)
@@ -843,6 +1302,111 @@ if __name__ == "__main__":
     )
     result3 = finalize_rated_game("casual001", winner="black", session_factory=test_session_factory)
     assert result3 is None, "casual对局不应该触发评分结算"
+
+    # 10) 第三方登录：首次登录自动建号，重复登录返回同一个用户，用户名冲突自动加数字
+    assert find_user_by_oauth("google", "google-uid-001", session_factory=test_session_factory) is None
+
+    google_user = get_or_create_oauth_user(
+        "google", "google-uid-001", "farkas", session_factory=test_session_factory
+    )
+    # "farkas" 已经被前面的密码注册占用了，应该自动变成 "farkas1" 之类的
+    assert google_user.username != "farkas"
+    assert google_user.username.startswith("farkas")
+
+    # 再用同一个 provider_user_id 登录一次，应该返回同一个用户，不会重复建号
+    google_user_again = get_or_create_oauth_user(
+        "google", "google-uid-001", "farkas", session_factory=test_session_factory
+    )
+    assert google_user_again.id == google_user.id
+
+    # 不同的 provider（哪怕 provider_user_id 数值一样）应该被当成不同账号
+    facebook_user = get_or_create_oauth_user(
+        "facebook", "google-uid-001", "someone", session_factory=test_session_factory
+    )
+    assert facebook_user.id != google_user.id
+
+    # 11) 取消/删除房间
+    cancel_game = Game()
+    save_game("to_be_cancelled", cancel_game, black_player="farkas", session_factory=test_session_factory)
+    assert game_exists("to_be_cancelled", session_factory=test_session_factory) is True
+    assert delete_game("to_be_cancelled", session_factory=test_session_factory) is True
+    assert game_exists("to_be_cancelled", session_factory=test_session_factory) is False
+    assert delete_game("to_be_cancelled", session_factory=test_session_factory) is False, \
+        "已经删过的对局再删一次应该返回False，不报错"
+
+    # 12) 开局库树结构
+    root_id = ensure_opening_root(session_factory=test_session_factory)
+    assert root_id is not None
+    # 重复调用不应该重复建根
+    assert ensure_opening_root(session_factory=test_session_factory) == root_id
+
+    # 录入"苍穹开局"的前两手：1.e6 g7
+    n_e6 = add_opening_move(root_id, "e5", "e6", name="苍穹开局",
+                            session_factory=test_session_factory)
+    assert n_e6["move_notation"] == "e6", f"记谱应该自动生成: {n_e6['move_notation']}"
+    assert n_e6["moved_side"] == "black"
+    n_g7 = add_opening_move(n_e6["id"], "g8", "g7", session_factory=test_session_factory)
+    assert n_g7["moved_side"] == "white"
+
+    # 从同一个局面录入另一条分支：1.e6 之后白方改走 e7（天琴反弃兵的起手）
+    n_e7 = add_opening_move(n_e6["id"], "e8", "e7", name="天琴反弃兵",
+                            session_factory=test_session_factory)
+
+    # 两条分支应该都挂在 e6 这个共享的父节点下
+    children = list_opening_children(n_e6["id"], session_factory=test_session_factory)
+    assert len(children) == 2, f"e6 下面应该有两条分支，实际 {len(children)}"
+    assert {c["move_notation"] for c in children} == {"g7", "e7"}
+
+    # 非法走法必须被拒绝，不能录进库里
+    try:
+        add_opening_move(root_id, "e5", "e12", session_factory=test_session_factory)
+        raise AssertionError("非法走法不应该能录入开局库")
+    except Exception:
+        pass
+
+    # 重复录同一步不会产生重复分支，而是复用并可顺便补充名称
+    again = add_opening_move(n_e6["id"], "g8", "g7", name="苍穹主线",
+                             session_factory=test_session_factory)
+    assert again["id"] == n_g7["id"], "重复录入同一步应该复用已有节点"
+    assert again["name"] == "苍穹主线"
+    assert len(list_opening_children(n_e6["id"], session_factory=test_session_factory)) == 2
+
+    # 排序：把 e7 那条调到最前面
+    reorder_opening_children(n_e6["id"], [n_e7["id"], n_g7["id"]],
+                             session_factory=test_session_factory)
+    reordered = list_opening_children(n_e6["id"], session_factory=test_session_factory)
+    assert reordered[0]["move_notation"] == "e7", "重排后 e7 应该排在最前面"
+
+    # has_children 标记：g7 下面再录一手，它就应该被标记为"还有后续"
+    add_opening_move(n_g7["id"], "c2", "f3", session_factory=test_session_factory)
+    refreshed = list_opening_children(n_e6["id"], session_factory=test_session_factory)
+    g7_entry = next(c for c in refreshed if c["move_notation"] == "g7")
+    e7_entry = next(c for c in refreshed if c["move_notation"] == "e7")
+    assert g7_entry["has_children"] is True
+    assert e7_entry["has_children"] is False
+
+    # 路径回溯：从最深的节点应该能还原出整条线
+    deepest = list_opening_children(n_g7["id"], session_factory=test_session_factory)[0]
+    path = get_opening_path(deepest["id"], session_factory=test_session_factory)
+    assert [p["move_notation"] for p in path] == ["e6", "g7", "Hcf3"], \
+        f"路径还原异常: {[p['move_notation'] for p in path]}"
+
+    # 修改名称与备注
+    updated = update_opening_node(n_e7["id"], comment="白方立刻反击中心",
+                                  session_factory=test_session_factory)
+    assert updated["comment"] == "白方立刻反击中心"
+
+    # 删除子树：删掉 g7 应该连它下面的 Hcf3 一起删掉（共2个节点）
+    deleted_count = delete_opening_subtree(n_g7["id"], session_factory=test_session_factory)
+    assert deleted_count == 2, f"应该连同子树一起删除2个节点，实际 {deleted_count}"
+    assert len(list_opening_children(n_e6["id"], session_factory=test_session_factory)) == 1
+
+    # 根节点不允许删除
+    try:
+        delete_opening_subtree(root_id, session_factory=test_session_factory)
+        raise AssertionError("根节点不应该能被删除")
+    except ValueError:
+        pass
 
     print("db.py 自检全部通过 ✅")
 

@@ -213,6 +213,11 @@
   }
   table.lobby-table tr.room-row { cursor: pointer; }
   table.lobby-table tr.room-row:hover { background: rgba(184, 148, 75, 0.1); }
+  table.lobby-table tr.room-row-mine {
+    background: rgba(184, 148, 75, 0.18);
+    font-weight: 700;
+  }
+  table.lobby-table tr.room-row-mine:hover { background: rgba(184, 148, 75, 0.28); }
   .side-flag {
     display: inline-block;
     width: 10px; height: 10px;
@@ -287,6 +292,27 @@
   }
   .modal-box .modal-actions button { flex: 1; padding: 9px; }
   .modal-box .modal-msg { min-height: 18px; font-size: 12px; color: var(--gold); margin-top: 8px; }
+
+  .oauth-divider {
+    display: flex;
+    align-items: center;
+    text-align: center;
+    margin: 16px 0 12px;
+    color: var(--gold);
+    font-size: 12px;
+    opacity: 0.8;
+  }
+  .oauth-divider::before, .oauth-divider::after {
+    content: "";
+    flex: 1;
+    border-bottom: 1px solid rgba(184, 148, 75, 0.3);
+  }
+  .oauth-divider span { padding: 0 10px; }
+
+  .oauth-btn-row {
+    display: flex;
+    justify-content: center;
+  }
   .modal-close {
     float: right;
     background: none;
@@ -388,6 +414,7 @@
     .topbar, .content { grid-column: 1; }
   }
 </style>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -495,6 +522,8 @@
       <button id="modal-btn-register">注册</button>
     </div>
     <div class="modal-msg" id="modal-msg"></div>
+    <div class="oauth-divider"><span>或</span></div>
+    <div id="google-signin-button" class="oauth-btn-row"></div>
   </div>
 </div>
 
@@ -546,6 +575,7 @@
   // -------------------------------------------------------------------
   let authToken = localStorage.getItem("arkatana_token") || null;
   let authUsername = localStorage.getItem("arkatana_username") || null;
+  let myPendingGameId = null;  // 我自己创建、还在大厅里等对手的房间（点它是取消，不是加入）
 
   const accountChip = document.getElementById("account-chip");
   const sidebarAccount = document.getElementById("sidebar-account");
@@ -627,10 +657,55 @@
   });
 
   // -------------------------------------------------------------------
+  // Google 登录
+  // -------------------------------------------------------------------
+  const GOOGLE_CLIENT_ID = "74979820784-5igmiv6pi0tu3hkupec53s9ajfnb9asp.apps.googleusercontent.com";
+
+  async function handleGoogleCredential(response) {
+    try {
+      const data = await apiPost("/login/google", { credential: response.credential });
+      setAuth(data.token, data.username);
+      authModal.style.display = "none";
+      showToast(`登录成功，欢迎 ${data.username}`);
+      refreshLobby();
+      refreshHistory();
+    } catch (err) {
+      modalMsg.textContent = err.message;
+    }
+  }
+
+  function initGoogleSignIn() {
+    if (!window.google || !google.accounts) {
+      // Google 的脚本可能还没加载完，稍后再试一次
+      setTimeout(initGoogleSignIn, 300);
+      return;
+    }
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: handleGoogleCredential,
+    });
+    google.accounts.id.renderButton(
+      document.getElementById("google-signin-button"),
+      { theme: "outline", size: "large", width: 260 }
+    );
+  }
+  initGoogleSignIn();
+
+  // -------------------------------------------------------------------
   // 后端交互工具
   // -------------------------------------------------------------------
+  function getGuestId() {
+    let id = localStorage.getItem("arkatana_guest_id");
+    if (!id) {
+      id = "guest-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      localStorage.setItem("arkatana_guest_id", id);
+    }
+    return id;
+  }
+  const GUEST_ID = getGuestId();
+
   async function apiPost(path, body) {
-    const headers = { "Content-Type": "application/json" };
+    const headers = { "Content-Type": "application/json", "X-Guest-Id": GUEST_ID };
     if (authToken) headers["X-Auth-Token"] = authToken;
     const res = await fetch(path, {
       method: "POST",
@@ -643,7 +718,7 @@
   }
 
   async function apiGet(path) {
-    const headers = {};
+    const headers = { "X-Guest-Id": GUEST_ID };
     if (authToken) headers["X-Auth-Token"] = authToken;
     const res = await fetch(path, { headers });
     const data = await res.json();
@@ -695,12 +770,26 @@
     try {
       const data = await apiGet("/lobby?limit=20");
       const rooms = data.rooms || [];
+
+      // 如果我自己创建的房间不再出现在大厅里，说明有人加入、对局正式开始了，
+      // 这时候才把我（创建者）带进对局页面——不是创建的那一刻就跳转
+      if (myPendingGameId) {
+        const stillPending = rooms.some((r) => r.game_id === myPendingGameId);
+        if (!stillPending) {
+          const pendingId = myPendingGameId;
+          myPendingGameId = null;
+          window.location.href = `game.html?id=${pendingId}`;
+          return;
+        }
+      }
+
       if (rooms.length === 0) {
         lobbyBody.innerHTML = `<tr><td colspan="4" class="empty-note">暂时没有开放的房间</td></tr>`;
         return;
       }
       lobbyBody.innerHTML = "";
       for (const room of rooms) {
+        const isMine = room.game_id === myPendingGameId;
         const ownerUsername = room.black_player || room.white_player || null;
         const owner = ownerUsername || "匿名";
         const ratingInfo = ownerUsername ? await fetchRating(ownerUsername) : null;
@@ -717,21 +806,50 @@
         else if (room.white_player) flagClass = "white";
 
         const tr = document.createElement("tr");
-        tr.className = "room-row";
+        tr.className = "room-row" + (isMine ? " room-row-mine" : "");
         tr.innerHTML = `
-          <td><span class="side-flag ${flagClass}"></span>${owner}</td>
+          <td><span class="side-flag ${flagClass}"></span>${isMine ? "我的房间（等待对手中，点击取消）" : owner}</td>
           <td>${ratingText}</td>
           <td>${timeText}</td>
           <td>${modeText}</td>
         `;
         tr.addEventListener("click", () => {
-          window.location.href = `game.html?id=${room.game_id}`;
+          if (isMine) {
+            cancelMyPendingGame(room.game_id);
+          } else {
+            joinRoomAndEnter(room.game_id);
+          }
         });
         lobbyBody.appendChild(tr);
       }
     } catch (err) {
       lobbyBody.innerHTML = `<tr><td colspan="4" class="empty-note">大厅加载失败：${err.message}</td></tr>`;
     }
+  }
+
+  async function cancelMyPendingGame(gameId) {
+    try {
+      await apiPost(`/games/${gameId}/cancel`);
+      myPendingGameId = null;
+      showToast("已取消这局对局");
+      refreshLobby();
+    } catch (err) {
+      showToast("取消失败：" + err.message);
+    }
+  }
+
+  async function joinRoomAndEnter(gameId) {
+    try {
+      if (authToken) {
+        await apiPost(`/games/${gameId}/join`);
+      } else {
+        await apiPost(`/games/${gameId}/start`);
+      }
+    } catch (err) {
+      // 认领失败不阻塞跳转——进入对局页面后 game.html 自己还有一层后备处理
+      // （登录用户会自动重试 /join，游客可以在页面里手动点"进入并开始"）
+    }
+    window.location.href = `game.html?id=${gameId}`;
   }
 
   document.getElementById("btn-refresh-lobby").addEventListener("click", refreshLobby);
@@ -884,7 +1002,10 @@
 
     try {
       const data = await apiPost("/games", body);
-      window.location.href = `game.html?id=${data.game_id}`;
+      myPendingGameId = data.game_id;
+      cgModal.style.display = "none";
+      showToast("对局已创建，正在大厅里等待对手加入…");
+      refreshLobby();
     } catch (err) {
       cgMsg.textContent = err.message;
       cgCreateBtn.textContent = "Create lobby game";

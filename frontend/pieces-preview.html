@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>棋子造型预览 · 古戰棋 Arkatana</title>
+<style>
+  :root {
+    --ink: #17161a;
+    --ink-raised: #232228;
+    --parchment-light: #ede3c8;
+    --parchment-dark: #cbb98d;
+    --gold: #b8944b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 64px;
+    background: var(--ink);
+    color: var(--parchment-light);
+    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  }
+  h1 { font-size: 22px; letter-spacing: 0.12em; margin: 0 0 6px; }
+  .sub { color: var(--gold); font-size: 13px; margin-bottom: 28px; }
+  h2 {
+    font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--gold); margin: 32px 0 12px; padding-bottom: 6px;
+    border-bottom: 1px solid rgba(184,148,75,0.3);
+  }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 14px;
+  }
+  .cell {
+    border: 1px solid rgba(184,148,75,0.25); border-radius: 4px;
+    padding: 10px 6px; text-align: center;
+    background: rgba(184,148,75,0.05);
+  }
+  .cell .sq {
+    width: 76px; height: 76px; margin: 0 auto 6px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 3px;
+  }
+  .cell.dark .sq { background: var(--parchment-dark); }
+  .cell.light .sq { background: var(--parchment-light); }
+  .cell .name { font-size: 12px; }
+  .cell .note { font-size: 10px; opacity: 0.6; }
+
+  .board-demo {
+    display: grid; grid-template-columns: repeat(11, 1fr);
+    max-width: 620px; border: 2px solid var(--gold); border-radius: 3px;
+    overflow: hidden;
+  }
+  .board-demo .sq {
+    aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  }
+  .board-demo .sq.dark { background: var(--parchment-dark); }
+  .board-demo .sq.light { background: var(--parchment-light); }
+  .board-demo svg { width: 92%; height: 92%; }
+</style>
+</head>
+<body>
+
+<h1>棋子造型预览</h1>
+<div class="sub">扁平矢量风格 · 黑方（先手）金色 / 白方（后手）银白 · 右半边棋子自动镜像朝向中线</div>
+
+<h2>黑方（先手）· 默认朝右</h2>
+<div class="grid" id="grid-black"></div>
+
+<h2>白方（后手）· 默认朝右</h2>
+<div class="grid" id="grid-white"></div>
+
+<h2>镜像对照 · 左侧朝右 vs 右侧朝左</h2>
+<div class="grid" id="grid-mirror"></div>
+
+<h2>开局摆位实况（黑方视角下半部分）</h2>
+<div class="board-demo" id="board-demo"></div>
+
+<script src="pieces.js"></script>
+<script>
+(() => {
+  const { pieceSVG, PIECE_NAMES } = window.ArkatanaPieces;
+  const ORDER = ["", "R", "C", "P", "N", "H", "TH", "A", "B", "T", "S"];
+
+  function renderGrid(elId, side) {
+    const el = document.getElementById(elId);
+    ORDER.forEach((n, i) => {
+      const div = document.createElement("div");
+      div.className = "cell " + (i % 2 ? "dark" : "light");
+      div.innerHTML = `
+        <div class="sq">${pieceSVG(n, side, { col: 0, size: 68 })}</div>
+        <div class="name">${PIECE_NAMES[n]}</div>
+        <div class="note">${n || "（无字母）"}</div>`;
+      el.appendChild(div);
+    });
+  }
+  renderGrid("grid-black", "black");
+  renderGrid("grid-white", "white");
+
+  // 镜像对照：拿几个方向性明显的棋子，左右各画一次
+  const mirrorEl = document.getElementById("grid-mirror");
+  ["P", "N", "H", "S", "B", "T", "C", ""].forEach((n) => {
+    [0, 8].forEach((col) => {
+      const div = document.createElement("div");
+      div.className = "cell " + (col === 0 ? "light" : "dark");
+      div.innerHTML = `
+        <div class="sq">${pieceSVG(n, "black", { col, size: 68 })}</div>
+        <div class="name">${PIECE_NAMES[n]}</div>
+        <div class="note">${col === 0 ? "左侧 a列" : "右侧 i列"}</div>`;
+      mirrorEl.appendChild(div);
+    });
+  });
+
+  // 开局摆位：黑方第1、2、4、5排
+  const COLS = "abcdefghijk";
+  const LAYOUT = {
+    1: ["R","C","P","N","S","TH","S","N","P","C","R"],
+    2: [null,null,"H",null,null,null,null,null,"H",null,null],
+    4: ["T",null,null,"B",null,"A",null,"B",null,null,"T"],
+    5: ["","","","","","","","","","",""],
+  };
+  const boardEl = document.getElementById("board-demo");
+  [5, 4, 2, 1].forEach((row) => {
+    LAYOUT[row].forEach((n, col) => {
+      const sq = document.createElement("div");
+      sq.className = "sq " + ((col + row) % 2 === 0 ? "dark" : "light");
+      if (n !== null) sq.innerHTML = pieceSVG(n, "black", { col });
+      boardEl.appendChild(sq);
+    });
+  });
+})();
+</script>
+</body>
+</html>

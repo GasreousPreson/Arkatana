@@ -3,3 +3,5 @@ uvicorn==0.49.0
 websockets
 sqlalchemy==2.0.51
 psycopg2-binary
+google-auth
+requests

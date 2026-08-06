@@ -38,11 +38,14 @@ from __future__ import annotations
 import uuid
 import secrets
 import random
+import os
 
 from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect, Security
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
 
 from board import parse_coord, coord_to_str
 from pieces import Side, Throne
@@ -53,11 +56,15 @@ from clock import TimeControl
 import db
 
 
-app = FastAPI(title="Arkatana API", version="0.6.0")
+app = FastAPI(title="Arkatana API", version="0.7.0")
 
 # 注册一个具名的安全方案，Swagger 页面右上角会出现一个"Authorize"锁头按钮，
 # 登录后把 token 粘贴进去点一次，之后所有接口请求会自动带上，不用每个接口都手填。
 auth_scheme = APIKeyHeader(name="X-Auth-Token", auto_error=False)
+
+# Google 登录用的 Client ID（这个不是密钥，前端也会用到同一个值，
+# 但还是放进环境变量里方便以后换项目/换环境时不用改代码）。
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 
 # 启动时建表（如果表已存在，这行不会做任何事，可以放心每次都调用）
 db.init_db()
@@ -76,6 +83,12 @@ GAME_PLAYERS: dict[str, dict] = {}
 
 # 内存对局的 rated 标记缓存：{game_id: bool}
 GAME_RATED: dict[str, bool] = {}
+
+# 匿名访客的身份绑定：{game_id: {"black": guest_id|None, "white": guest_id|None}}
+# 跟 GAME_PLAYERS 是平行的两套机制——GAME_PLAYERS 认的是登录账号，
+# 这套认的是浏览器本地生成的"访客ID"（没有账号、不会持久化到数据库，
+# 服务器重启后清空，纯粹用来区分"匿名对局里到底是不是同一个人在操作"）。
+GAME_GUEST_CLAIMS: dict[str, dict] = {}
 
 # 内存登录令牌存储：{token: username}
 # 注意：这是临时方案，服务器重启后所有人都需要重新登录。
@@ -146,6 +159,10 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class OAuthLoginRequest(BaseModel):
+    credential: str  # Google 返回的 ID token（一段 JWT 字符串）
+
+
 # ---------------------------------------------------------------------------
 # 内部工具函数
 # ---------------------------------------------------------------------------
@@ -181,6 +198,8 @@ def game_state(game_id: str, game: Game) -> dict:
             "white_time": clock.time_left("white"),
         }
 
+    last_move_record = game.move_log[-1] if game.move_log else None
+
     return {
         "game_id": game_id,
         "current_side": game.current_side.value,
@@ -191,6 +210,9 @@ def game_state(game_id: str, game: Game) -> dict:
         "white_player": players["white"],
         "rated": GAME_RATED.get(game_id, False),
         "clock_started": game.clock.active_side is not None,
+        "in_check": is_in_check(game.board, game.current_side) if game.result.value == "ongoing" else False,
+        "last_move_from": coord_to_str(*last_move_record.from_sq) if last_move_record else None,
+        "last_move_to": coord_to_str(*last_move_record.to_sq) if last_move_record else None,
         **time_info,
     }
 
@@ -281,21 +303,63 @@ def get_players_cached(game_id: str) -> dict:
     return GAME_PLAYERS[game_id]
 
 
-def authorize_participant(game_id: str, x_auth_token: str | None) -> str | None:
+def get_guest_claims(game_id: str) -> dict:
+    """获取某局对局的访客身份绑定情况；不存在则初始化一个空的（两边都没人认领）"""
+    if game_id not in GAME_GUEST_CLAIMS:
+        GAME_GUEST_CLAIMS[game_id] = {"black": None, "white": None}
+    return GAME_GUEST_CLAIMS[game_id]
+
+
+def resolve_my_side(game_id: str, username: str | None, guest_id: str | None) -> str | None:
     """
-    校验调用者是否有权对这局对局做出影响状态的操作（悔棋/认输/走棋等）。
-    - 如果这局对局黑白双方都没有绑定账号（纯匿名对局），不做任何限制，返回 None。
-    - 如果绑定了账号，调用者必须登录，且必须是这两位玩家之一，否则抛出异常。
-    返回调用者的用户名（匿名对局则返回 None）。
+    判定"发起这次请求的人"到底是这局对局的黑方、白方，还是都不是。
+    同时兼容两种身份：登录账号（优先判断）、匿名访客身份。
+    这个值是"per-caller"的（每个人看到的都可能不一样），不能塞进
+    WebSocket 广播的公共状态里（广播是所有人收到同一份），只应该用在
+    "直接返回给发起这次请求的人"的 HTTP 响应里。
     """
     players = get_players_cached(game_id)
-    if players["black"] is None and players["white"] is None:
-        return None  # 纯匿名对局，不做身份限制
+    if username is not None:
+        if players["black"] == username:
+            return "black"
+        if players["white"] == username:
+            return "white"
+    claims = get_guest_claims(game_id)
+    if guest_id is not None:
+        if claims["black"] == guest_id:
+            return "black"
+        if claims["white"] == guest_id:
+            return "white"
+    return None
 
-    username = require_login(x_auth_token)
-    if username not in (players["black"], players["white"]):
+
+def authorize_participant(game_id: str, x_auth_token: str | None, x_guest_id: str | None = None) -> str | None:
+    """
+    校验调用者是否有权对这局对局做出影响状态的操作（悔棋/认输/走棋等）。
+    - 如果黑白双方既没有绑定账号、也没有访客身份认领，不做任何限制，返回 None。
+    - 如果有账号绑定，调用者必须登录，且必须是这两位玩家之一。
+    - 没有账号绑定但有访客身份认领，调用者的 X-Guest-Id 必须匹配其中一方。
+    返回调用者的用户名（访客/纯匿名情况下返回 None）。
+    """
+    players = get_players_cached(game_id)
+    claims = get_guest_claims(game_id)
+
+    has_account_binding = players["black"] is not None or players["white"] is not None
+    has_guest_binding = claims["black"] is not None or claims["white"] is not None
+
+    if not has_account_binding and not has_guest_binding:
+        return None  # 完全没人认领任何一方，不做身份限制
+
+    if has_account_binding:
+        username = require_login(x_auth_token)
+        if username not in (players["black"], players["white"]):
+            raise HTTPException(status_code=403, detail="你不是这局对局的玩家")
+        return username
+
+    # 只有访客身份绑定，没有账号绑定
+    if x_guest_id not in (claims["black"], claims["white"]):
         raise HTTPException(status_code=403, detail="你不是这局对局的玩家")
-    return username
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +405,38 @@ def login(body: LoginRequest):
     return {"token": token, "username": username}
 
 
+@app.post("/login/google")
+def login_google(body: OAuthLoginRequest):
+    """
+    用 Google 账号登录。前端用 Google Identity Services 的登录按钮
+    拿到一个 ID token（一段签名过的 JWT），传给这个接口验证。
+
+    验证通过后：
+    - 如果这个 Google 账号之前登录过，直接用回原来关联的本站账号
+    - 第一次登录：自动创建一个新账号（用户名从 Google 邮箱前缀生成，
+      重复了会自动加数字），不需要用户自己再填用户名密码
+    """
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="服务器还没配置 GOOGLE_CLIENT_ID，Google 登录暂不可用")
+
+    try:
+        payload = google_id_token.verify_oauth2_token(
+            body.credential, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=f"Google 登录凭证无效: {e}")
+
+    google_user_id = payload["sub"]  # Google 给每个用户的唯一ID，长期不变
+    email = payload.get("email", "")
+    suggested_username = email.split("@")[0] if email else f"google{google_user_id[:6]}"
+
+    user = db.get_or_create_oauth_user("google", google_user_id, suggested_username)
+
+    token = secrets.token_hex(16)
+    TOKENS[token] = user.username
+    return {"token": token, "username": user.username}
+
+
 @app.get("/me")
 def read_current_user(x_auth_token: str = Security(auth_scheme)):
     """查询当前令牌对应的登录用户，主要用于验证登录流程是否正常"""
@@ -360,14 +456,21 @@ def get_user_rating(username: str):
 # ---------------------------------------------------------------------------
 
 @app.post("/games")
-async def create_game(body: CreateGameRequest | None = None, x_auth_token: str = Security(auth_scheme)):
+async def create_game(
+    body: CreateGameRequest | None = None,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
     """
     创建一局新对局（也就是"开一个房间"）。
     如果携带了有效的登录令牌，可以指定 side_preference：
       - "black"：创建者执黑（先手）
       - "white"：创建者执白（后手）
       - "random"（默认）：随机决定创建者执哪一方
-    未指定或不登录时，等同于纯匿名对局，双方都不绑定账号，也不会出现在大厅里。
+    未登录时，如果请求头带了 X-Guest-Id（浏览器本地生成的访客身份），
+    仍然会按 side_preference 认领一方，只是这个身份是"访客"不是真实账号——
+    不会存进数据库、不会出现在对局历史里，纯粹用来防止两个不同的匿名访客
+    同时操作同一方棋子。完全不带 X-Guest-Id 时才是真正意义上"谁都能走"的对局。
 
     rated（排位）对局只能随机先后手，不能指定执黑/执白；
     而且 rated 对局必须设置时间控制（不能是无时间限制的"线下对练"模式）。
@@ -416,11 +519,23 @@ async def create_game(body: CreateGameRequest | None = None, x_auth_token: str =
     GAME_PLAYERS[game_id] = {"black": black_slot, "white": white_slot}
     GAME_RATED[game_id] = rated
 
+    if creator is None and x_guest_id:
+        claims = get_guest_claims(game_id)
+        if preference == "black":
+            claims["black"] = x_guest_id
+        elif preference == "white":
+            claims["white"] = x_guest_id
+        else:
+            if random.choice([True, False]):
+                claims["black"] = x_guest_id
+            else:
+                claims["white"] = x_guest_id
+
     persist(game_id, GAMES[game_id], black_player=black_slot, white_player=white_slot, rated=rated)
 
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
-    return state
+    return {**state, "my_side": resolve_my_side(game_id, creator, x_guest_id)}
 
 
 @app.post("/games/{game_id}/join")
@@ -450,25 +565,68 @@ async def join_game(game_id: str, x_auth_token: str = Security(auth_scheme)):
     persist(game_id, GAMES[game_id], black_player=players["black"], white_player=players["white"])
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
-    return state
+    return {**state, "my_side": resolve_my_side(game_id, username, None)}
 
 
 @app.post("/games/{game_id}/start")
-async def start_game(game_id: str):
+async def start_game(
+    game_id: str,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
     """
     正式开始一局对局（棋钟从此刻开始走）。这是"匿名对局"用的入口——
     因为匿名玩家没有账号，没法走 /join 那套"认领身份"的流程，
     所以只要是第二个真正打算下棋的人点了"进入对局"，前端就会调用这个接口。
-    如果棋钟已经在走了（比如已经有人触发过），这个接口不会做任何事，
+    如果调用者带着 X-Guest-Id 且这局对局还有没被认领的空位，
+    会顺便把那个空位分给这个访客身份（已经认领过的话不会重复处理）。
+    棋钟如果已经在走了（比如已经有人触发过），这个接口不会做任何事，
     可以放心重复调用。
     """
     game = get_game_or_404(game_id)
+    username = get_current_user(x_auth_token)
+    players = get_players_cached(game_id)
+    claims = get_guest_claims(game_id)
+
+    if x_guest_id and x_guest_id not in (claims["black"], claims["white"]):
+        for side in ("black", "white"):
+            if players[side] is None and claims[side] is None:
+                claims[side] = x_guest_id
+                break
+
     started_now = start_game_if_needed(game)
     if started_now:
         persist(game_id, game)
     state = game_state(game_id, game)
     await manager.broadcast(game_id, state)
-    return state
+    return {**state, "my_side": resolve_my_side(game_id, username, x_guest_id)}
+
+
+@app.post("/games/{game_id}/cancel")
+def cancel_game(
+    game_id: str,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
+    """
+    取消一局还在大厅里等待、谁都还没真正加入的房间（创建者反悔/自己点了自己的房间）。
+    只有创建者本人（账号或访客身份匹配）能取消；已经有人走过棋的对局不允许取消
+    （那种情况应该走认输，不是"当没发生过"）。
+    取消后这局对局会被彻底删除，不会留下任何痕迹。
+    """
+    game = get_game_or_404(game_id)
+    if len(game.move_log) > 0:
+        raise HTTPException(status_code=409, detail="对局已经开始，不能取消，只能认输")
+
+    authorize_participant(game_id, x_auth_token, x_guest_id)
+
+    GAMES.pop(game_id, None)
+    GAME_PLAYERS.pop(game_id, None)
+    GAME_GUEST_CLAIMS.pop(game_id, None)
+    GAME_RATED.pop(game_id, None)
+    db.delete_game(game_id)
+
+    return {"cancelled": True}
 
 
 @app.get("/games/mine")
@@ -484,10 +642,16 @@ def list_my_games(limit: int = 20, x_auth_token: str = Security(auth_scheme)):
 
 
 @app.get("/games/{game_id}")
-def get_game(game_id: str):
+def get_game(
+    game_id: str,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
     """查询某局对局当前的完整状态"""
     game = get_game_or_404(game_id)
-    return game_state(game_id, game)
+    username = get_current_user(x_auth_token)
+    state = game_state(game_id, game)
+    return {**state, "my_side": resolve_my_side(game_id, username, x_guest_id)}
 
 
 @app.get("/games/{game_id}/legal-moves")
@@ -507,16 +671,33 @@ def get_legal_moves(game_id: str, coord: str):
 
 
 @app.post("/games/{game_id}/move")
-async def make_move(game_id: str, move: MoveRequest, x_auth_token: str = Security(auth_scheme)):
-    """执行一步棋。如果当前轮到走棋的这一方已经绑定了账号，必须以该账号登录才能提交这步棋。"""
+async def make_move(
+    game_id: str,
+    move: MoveRequest,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
+    """
+    执行一步棋。
+    如果当前轮到走棋的这一方已经绑定了账号，必须以该账号登录才能提交这步棋；
+    如果绑定的是匿名访客身份（没有账号，但认领过这一方），
+    必须带上匹配的 X-Guest-Id 才能提交；两者都没绑定时不做限制。
+    """
     game = get_game_or_404(game_id)
     start_game_if_needed(game)  # 兜底：万一前端没调用 /start 就直接走棋了，这里保证棋钟正确开始
 
     players = get_players_cached(game_id)
-    mover_slot = players[game.current_side.value]
+    claims = get_guest_claims(game_id)
+    side_key = game.current_side.value
+    mover_slot = players[side_key]
+    guest_slot = claims[side_key]
+
     if mover_slot is not None:
         username = require_login(x_auth_token)
         if username != mover_slot:
+            raise HTTPException(status_code=403, detail="还没轮到你，这不是你的回合")
+    elif guest_slot is not None:
+        if x_guest_id != guest_slot:
             raise HTTPException(status_code=403, detail="还没轮到你，这不是你的回合")
 
     try:
@@ -542,14 +723,19 @@ async def make_move(game_id: str, move: MoveRequest, x_auth_token: str = Securit
     persist(game_id, game)
     maybe_finalize_rating(game_id, game)
     await manager.broadcast(game_id, response)
-    return response
+    my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
+    return {**response, "my_side": my_side}
 
 
 @app.post("/games/{game_id}/undo")
-async def undo_move(game_id: str, x_auth_token: str = Security(auth_scheme)):
-    """悔棋。如果这局对局绑定了账号，必须是黑方或白方玩家本人才能悔棋。"""
+async def undo_move(
+    game_id: str,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
+    """悔棋。如果这局对局绑定了账号或访客身份，必须是黑方或白方玩家本人才能悔棋。"""
     game = get_game_or_404(game_id)
-    authorize_participant(game_id, x_auth_token)
+    authorize_participant(game_id, x_auth_token, x_guest_id)
     try:
         game.undo()
     except IllegalMoveError as e:
@@ -557,12 +743,18 @@ async def undo_move(game_id: str, x_auth_token: str = Security(auth_scheme)):
     persist(game_id, game)
     state = game_state(game_id, game)
     await manager.broadcast(game_id, state)
-    return state
+    my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
+    return {**state, "my_side": my_side}
 
 
 @app.post("/games/{game_id}/resign")
-async def resign(game_id: str, body: ResignRequest, x_auth_token: str = Security(auth_scheme)):
-    """指定一方认输。如果这局对局绑定了账号，只能替自己那一方认输，不能替对方认输。"""
+async def resign(
+    game_id: str,
+    body: ResignRequest,
+    x_auth_token: str = Security(auth_scheme),
+    x_guest_id: str | None = Header(default=None),
+):
+    """指定一方认输。如果这局对局绑定了账号或访客身份，只能替自己那一方认输。"""
     game = get_game_or_404(game_id)
     if game.result.value != "ongoing":
         raise HTTPException(status_code=409, detail="对局已结束")
@@ -571,10 +763,16 @@ async def resign(game_id: str, body: ResignRequest, x_auth_token: str = Security
         raise HTTPException(status_code=400, detail="side 字段必须是 'black' 或 'white'")
 
     players = get_players_cached(game_id)
+    claims = get_guest_claims(game_id)
     resigning_slot = players[side_key]
+    resigning_guest = claims[side_key]
+
     if resigning_slot is not None:
         username = require_login(x_auth_token)
         if username != resigning_slot:
+            raise HTTPException(status_code=403, detail="只能替自己那一方认输")
+    elif resigning_guest is not None:
+        if x_guest_id != resigning_guest:
             raise HTTPException(status_code=403, detail="只能替自己那一方认输")
 
     side = Side.BLACK if side_key == "black" else Side.WHITE
@@ -583,7 +781,8 @@ async def resign(game_id: str, body: ResignRequest, x_auth_token: str = Security
     maybe_finalize_rating(game_id, game)
     state = game_state(game_id, game)
     await manager.broadcast(game_id, state)
-    return state
+    my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
+    return {**state, "my_side": my_side}
 
 
 @app.get("/lobby")
