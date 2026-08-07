@@ -59,6 +59,28 @@ import clock as clock_module
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_PATH = os.environ.get("DATABASE_PATH", "arkatana.db")
 
+# Render 会自动给每个服务设一个 RENDER=true 的环境变量，专门就是给代码用来判断
+# "我是不是跑在 Render 上"的。
+#
+# 这里用它做一道安全阀：Render 的免费实例本地磁盘是"临时的"——每次重新部署/
+# 容器重建，本地文件就没了。如果 DATABASE_URL 因为任何原因（环境变量被清空、
+# 忘记配置、拼错名字……）没有生效，代码会不声不响地退回到本地 SQLite 文件，
+# 那份数据在下一次部署就会被冲掉，而且全程不会有任何报错——这正是之前账号
+# 数据丢失的真正原因。
+#
+# 所以现在的规则是：**只要检测到是在 Render 上跑、但没配置 DATABASE_URL，
+# 直接拒绝启动**，而不是"能凑合跑就先跑着"。宁可眼前部署失败、你一眼就看出
+# 问题所在，也不要让它悄悄用临时存储把数据存丢。
+IS_RENDER = os.environ.get("RENDER") == "true"
+if IS_RENDER and not DATABASE_URL:
+    raise RuntimeError(
+        "检测到正运行在 Render 上，但环境变量 DATABASE_URL 没有配置！\n"
+        "如果就这样启动，所有数据都会存在 Render 的临时本地磁盘里，\n"
+        "下一次部署或重启就会全部丢失（之前的账号丢失就是这个原因）。\n"
+        "请先去 Render 服务的 Environment 页面确认 DATABASE_URL 这一项还在、\n"
+        "值也对（应该是 Neon 提供的 PostgreSQL 连接串），再重新部署。"
+    )
+
 
 def _build_engine(sqlite_path: str | None = None):
     """
@@ -79,6 +101,13 @@ def _build_engine(sqlite_path: str | None = None):
 
 engine = _build_engine()
 SessionLocal = sessionmaker(bind=engine)
+
+# 启动时把"这次到底用的是哪个数据库"直接打进日志，一眼就能看出来，
+# 不用等到数据丢了才去猜——Render 的 Logs 页面里应该能看到这一行。
+if DATABASE_URL:
+    print(f"[db.py] 使用 PostgreSQL（数据会持久保存，不受重启/重新部署影响）")
+else:
+    print(f"[db.py] ⚠️ 使用本地 SQLite 文件：{DB_PATH}（如果这是在 Render 上看到这条，说明数据不会持久保存，请检查 DATABASE_URL 配置）")
 
 
 # ---------------------------------------------------------------------------
