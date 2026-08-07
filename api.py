@@ -522,6 +522,13 @@ async def create_game(
     自己的棋钟却在空转。
     """
     creator = get_current_user(x_auth_token)
+    if x_auth_token and creator is None:
+        # 带了令牌但服务器查不到——通常是服务器重启过、内存里的登录状态清空了
+        # （令牌目前是纯内存存储，这是已知的架构限制）。
+        # 不能悄悄当成匿名处理，那会让"明明登录了却建出匿名房间"这种confusing的情况
+        # 悄无声息地发生；应该让调用方知道，去重新登录。
+        raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录后再创建对局")
+
     preference = (body.side_preference if body else "random").strip().lower()
     rated = bool(body.rated) if body else False
     minutes_per_side = body.minutes_per_side if body else None

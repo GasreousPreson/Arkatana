@@ -1005,6 +1005,11 @@
       showToast("对局已创建，正在大厅里等待对手加入…");
       refreshLobby();
     } catch (err) {
+      if (err.message.includes("登录状态已失效")) {
+        // token 已经不被服务器认识了（通常是服务器重启过）：
+        // 清掉本地这份"过期的登录假象"，让页面老老实实显示"未登录"
+        setAuth(null, null);
+      }
       cgMsg.textContent = err.message;
       cgCreateBtn.textContent = "Create lobby game";
       cgCreateBtn.disabled = false;
