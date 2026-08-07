@@ -839,16 +839,14 @@
   }
 
   async function joinRoomAndEnter(gameId) {
+    // 点一下就直接进对局并开始，不再有"等待对手加入 / 进入并开始"这一步。
+    // 登录用户走 /join 认领身份；游客没有账号可认领，用 /start 让棋钟跑起来。
     try {
-      if (authToken) {
-        await apiPost(`/games/${gameId}/join`);
-      } else {
-        await apiPost(`/games/${gameId}/start`);
-      }
-    } catch (err) {
-      // 认领失败不阻塞跳转——进入对局页面后 game.html 自己还有一层后备处理
-      // （登录用户会自动重试 /join，游客可以在页面里手动点"进入并开始"）
-    }
+      if (authToken) await apiPost(`/games/${gameId}/join`);
+    } catch (err) { /* 可能已经是玩家或已满员，不阻塞进入 */ }
+    try {
+      await apiPost(`/games/${gameId}/start`);
+    } catch (err) { /* 已经开始过了也没关系，这个接口可以重复调用 */ }
     window.location.href = `game.html?id=${gameId}`;
   }
 

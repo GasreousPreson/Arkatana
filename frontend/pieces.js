@@ -10,7 +10,8 @@
  *   piece : pawn rook chariot phoenix knight hussar throne ares ballista turret swordsman
  *
  * 朝向：左右两版素材是实际画好的（不是代码翻转）——
- * a~f 列用左版 _l，g~l 列用右版 _r，让两侧棋子都朝向棋盘中线。
+ * 按棋子在**屏幕上的显示位置**选版本（左半屏用 _l、右半屏用 _r），
+ * 这样不管黑方视角还是白方视角，棋子看上去都朝向棋盘中心。
  * 王城、大将、攻城塔、兵只有单一造型，不带 _l/_r 后缀。
  *
  * 注意列字母已改为 abcdefghjkl（跳过 i，避免与 j 混淆）。
@@ -40,22 +41,56 @@
   // 只有单一造型、不分左右的棋子（王城、大将、攻城塔、兵）
   const NO_VARIANT = new Set(["TH", "A", "R", ""]);
 
+  // 各棋子相对格子的显示比例（1.0 = 正好一格）。
+  // 造型繁简不同，统一比例会显得有的臃肿有的干瘪，这里逐个微调。
+  const PIECE_SCALE = {
+    TH: 1.02,   // 王城：撑到接近格子边界
+    A:  0.99,   // 大将
+    C:  0.99,   // 战车
+    N:  0.95,   // 重骑
+    H:  0.95,   // 轻骑
+    P:  0.95,   // 凤凰
+    S:  0.82,   // 剑士：略微缩小
+  };
+  const DEFAULT_SCALE = 0.9;
+
+  /** 这枚棋子该按多大比例画（相对格子边长） */
+  function pieceScale(notation) {
+    return PIECE_SCALE[notation] !== undefined ? PIECE_SCALE[notation] : DEFAULT_SCALE;
+  }
+
   // 有左右两版素材的棋子（素材本身就画好了朝向，代码不做镜像）
   const VARIANT_PIECES = ["ballista", "chariot", "hussar", "knight",
                           "phoenix", "swordsman", "turret"];
 
   /**
    * 这枚棋子该用哪张素材。
-   * 左右两版是实际画好的（不是代码翻转），a~f 列用左版，g~l 列用右版，
-   * 这样两侧棋子都朝向棋盘中线，跟实体棋的摆法一致。
+   *
+   * 关键：左右两版按**棋子在屏幕上的显示位置**来选，不是按逻辑列。
+   * 实体棋平躺在盘上、图案朝向中线，从任何一侧看过去它都朝向
+   * "你眼中的棋盘中心"——所以翻转视角后，原本在左边的 a 列跑到右边，
+   * 它就该换成右版才对。按逻辑列选会导致白方视角下棋子集体朝外。
+   *
+   * @param {boolean} flipped 当前是否是白方视角（棋盘左右上下翻转）
    */
-  function pieceImagePath(notation, side, square) {
+  function pieceImagePath(notation, side, square, flipped, stickyVariant) {
     const piece = PIECE_FILES[notation];
     if (piece === undefined) return null;
     if (NO_VARIANT.has(notation)) return `${BASE}${side}_${piece}.png`;
+    return `${BASE}${side}_${piece}_${resolveVariant(square, flipped, stickyVariant)}.png`;
+  }
+
+  /**
+   * 决定用左版还是右版：
+   *   - 显示位置在左半屏 -> 左版；右半屏 -> 右版（永远朝向屏幕中心）
+   *   - **正好在正中的 f 线**：不立即翻面，沿用它原来的朝向（stickyVariant）；
+   *     没有历史朝向可继承时才退回左版。这样棋子路过中线不会突兀地翻一下。
+   */
+  function resolveVariant(square, flipped, stickyVariant) {
     const colIndex = square ? COLS.indexOf(square[0]) : 0;
-    const variant = colIndex >= 6 ? "r" : "l";
-    return `${BASE}${side}_${piece}_${variant}.png`;
+    const displayCol = flipped ? (COLS.length - 1 - colIndex) : colIndex;
+    if (displayCol === 5) return stickyVariant || "l";   // 正中一列，保持原朝向
+    return displayCol >= 6 ? "r" : "l";
   }
 
   // ---------------------------------------------------------------
@@ -88,8 +123,8 @@
   }
 
   /** 取已加载好的素材；没有则返回 null（调用方退回占位画法） */
-  function getImage(notation, side, square) {
-    const path = pieceImagePath(notation, side, square);
+  function getImage(notation, side, square, flipped, stickyVariant) {
+    const path = pieceImagePath(notation, side, square, flipped, stickyVariant);
     return path ? (cache[path] || null) : null;
   }
 
@@ -98,5 +133,5 @@
     return Object.keys(cache).length;
   }
 
-  global.ArkatanaPieces = { pieceImagePath, preloadAll, getImage, loadedCount };
+  global.ArkatanaPieces = { pieceImagePath, resolveVariant, pieceScale, preloadAll, getImage, loadedCount };
 })(window);

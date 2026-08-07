@@ -8,8 +8,8 @@
   :root {
     --ink: #17161a;
     --ink-raised: #232228;
-    --parchment-light: #ede3c8;
-    --parchment-dark: #cbb98d;
+    --parchment-light: #f2eee4;   /* 浅格：偏暖的浅白灰 */
+    --parchment-dark: #cdc6b1;    /* 深格：微偏黄色调的浅灰 */
     --cinnabar: #a6362b;
     --jade: #3f6656;
     --gold: #b8944b;
@@ -75,6 +75,10 @@
     gap: 10px;
     flex-shrink: 0;
   }
+  /* 左栏拉到跟棋盘一样高，让两张棋手卡分别贴住棋盘的上下两端 */
+  .side-col.match-board { min-height: 744px; }
+  .side-col.match-board .move-list-card { flex: 1; max-height: none; }
+  .side-col.match-board .spacer { flex: 1; }
 
   .center-col {
     display: flex;
@@ -254,26 +258,20 @@
     align-items: center;
     gap: 3px;
     min-height: 24px;
-    max-width: 734px;
+    max-width: 682px;
     flex-wrap: wrap;
   }
   .piece-chip {
-    width: 22px; height: 22px;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 11px; font-weight: 700;
-    border: 1px solid var(--ink);
+    width: 26px; height: 26px;
     flex-shrink: 0;
+    object-fit: contain;
   }
-  .piece-chip.black { background: var(--cinnabar); color: var(--parchment-light); }
-  .piece-chip.white { background: var(--jade); color: var(--parchment-light); }
-  .piece-chip.pawn-chip { width: 16px; height: 16px; font-size: 9px; margin-left: -4px; }
+  /* 兵之间排得更紧凑一些 */
+  .piece-chip.pawn-chip { width: 21px; height: 21px; margin-left: -7px; }
 
   #board-wrap { position: relative; max-width: 92vw; }
   canvas#board {
     background: var(--parchment-light);
-    border-radius: 2px;
-    box-shadow: 0 0 0 1px var(--gold), 0 12px 30px rgba(0,0,0,0.5);
     max-width: 100%;
     height: auto;
     cursor: pointer;
@@ -413,8 +411,8 @@
 
 <div class="table-layout">
 
-  <!-- 左栏：对方信息、走子记录、操作按钮、我方信息 -->
-  <aside class="side-col">
+  <!-- 左栏：对方信息 → 走子记录 → 申请/结果 → 操作按钮 → 我方信息 -->
+  <aside class="side-col match-board">
     <div class="player-card" id="player-card-top">
       <div class="name-row">
         <span class="name" id="top-name">-</span>
@@ -428,6 +426,15 @@
 
     <div class="move-list-card">
       <ul id="history-log"></ul>
+    </div>
+
+    <div class="offer-banner" id="offer-banner"></div>
+
+    <div id="result-panel">
+      <div class="result-text" id="result-text"></div>
+      <div class="result-actions">
+        <button id="btn-game-review">Game review</button>
+      </div>
     </div>
 
     <div class="action-row">
@@ -445,8 +452,6 @@
       </div>
     </div>
 
-    <div class="offer-banner" id="offer-banner"></div>
-
     <div class="player-card" id="player-card-bottom">
       <div class="name-row">
         <span class="name" id="bottom-name">-</span>
@@ -463,23 +468,11 @@
   <div class="center-col">
     <div class="captured-row" id="captured-top"></div>
     <div id="board-wrap">
-      <canvas id="board" width="734" height="796"></canvas>
+      <canvas id="board" width="682" height="744"></canvas>
     </div>
     <div class="captured-row" id="captured-bottom"></div>
 
     <div id="message-line"></div>
-
-    <div id="waiting-panel">
-      <div>对局尚未开始，等待对手加入…</div>
-      <button id="btn-start-game">▶ 进入并开始对局</button>
-    </div>
-
-    <div id="result-panel">
-      <div class="result-text" id="result-text"></div>
-      <div class="result-actions">
-        <button id="btn-game-review">Game review</button>
-      </div>
-    </div>
 
     <div id="replay-bar">
       <button id="btn-replay-prev">◀ 上一步</button>
@@ -507,19 +500,6 @@
       </div>
     </div>
 
-    <div class="card">
-      <h2>账号</h2>
-      <div class="account-mini" id="account-mini">
-        <div id="auth-status">未登录（可以匿名对局）</div>
-        <input type="text" id="auth-username" placeholder="用户名" autocomplete="username">
-        <input type="password" id="auth-password" placeholder="密码" autocomplete="current-password">
-        <div class="row-btns">
-          <button id="btn-login">登录</button>
-          <button id="btn-register">注册</button>
-        </div>
-        <button id="btn-logout" style="display:none;">登出</button>
-      </div>
-    </div>
   </aside>
 
 </div>
@@ -536,7 +516,7 @@
   const MIN_ROW = 1;
   const MAX_ROW = 12;
   const CELL = 62;   // 格子略微加大
-  const MARGIN = 26; // 带坐标的外框做薄
+  const MARGIN = 0;  // 无外框，坐标直接画进棋盘格内
 
   const canvas = document.getElementById("board");
   const ctx = canvas.getContext("2d");
@@ -548,7 +528,7 @@
     cinnabar: "#a6362b",
     jade: "#3f6656",
     gold: "#b8944b",
-    lastMove: "rgba(184, 148, 75, 0.38)",
+    lastMove: "rgba(214, 168, 60, 0.45)",   // 走子标注：金橙色
     checkGlow: "rgba(196, 45, 45, 0.55)",
   };
 
@@ -580,7 +560,10 @@
   const ANIM_MS = 400;
   let anim = null;            // { fromSq, toSq, movingInfo, capturedInfo, startedAt }
   let animRaf = null;
-  let prevBoardState = null;  // 上一帧的棋盘，用来对比出"这一步是谁走的、吃了什么"
+  let prevBoardState = null;     // 上一帧的棋盘，用来对比出"这一步是谁走的、吃了什么"
+  // 每格棋子当前用的是左版还是右版。走到正中 f 线时不翻面，
+  // 需要靠这张表把"原来的朝向"带过去。
+  let orientationBySquare = {};
 
   let replayMode = false;
   let replaySteps = [];
@@ -589,112 +572,53 @@
   let authToken = localStorage.getItem("arkatana_token") || null;
   let authUsername = localStorage.getItem("arkatana_username") || null;
 
-  const authStatusEl = document.getElementById("auth-status");
+
   const authStatusMiniEl = document.getElementById("auth-status-mini");
-  const authUsernameInput = document.getElementById("auth-username");
-  const authPasswordInput = document.getElementById("auth-password");
-  const btnLogin = document.getElementById("btn-login");
-  const btnRegister = document.getElementById("btn-register");
-  const btnLogout = document.getElementById("btn-logout");
 
   const gameIdChip = document.getElementById("game-id-chip");
   const messageEl = document.getElementById("message-line");
   const historyEl = document.getElementById("history-log");
-  const waitingPanelEl = document.getElementById("waiting-panel");
   const resultPanelEl = document.getElementById("result-panel");
   const resultTextEl = document.getElementById("result-text");
 
   const ratingCache = {};
 
   // -------------------------------------------------------------------
-  // 音效：用 Web Audio 现场合成，不依赖外部音频文件
-  //   走子 —— 木块放到桌面上的闷响：低频正弦 + 短促噪声，快速衰减
-  //   吃子 —— 石块被敲碎：更亮更粗糙的噪声爆发 + 一点低频冲击
-  // 浏览器要求用户先与页面交互过才允许播放声音，所以这里是懒初始化。
+  // 音效
+  //   己方走棋 move.mp3 / 对方走棋 move-2.mp3 / 吃子 capture_2.mp3
+  //   将军·将杀 check.mp3
+  // 说明：浏览器要求页面被交互过才允许播声音，所以首次点击时解锁一次；
+  // 另外同一个 Audio 元素连续播放会互相打断，这里每次播放都克隆一份，
+  // 保证连续走棋时不会出现"该响的时候没响"。
   // -------------------------------------------------------------------
-  let audioCtx = null;
+  const SOUNDS = {
+    moveSelf:  new Audio("sounds/move.mp3"),
+    moveOther: new Audio("sounds/move-2.mp3"),
+    capture:   new Audio("sounds/capture_2.mp3"),
+    check:     new Audio("sounds/check.mp3"),
+  };
+  Object.values(SOUNDS).forEach((a) => { a.preload = "auto"; a.volume = 0.85; });
 
-  function ensureAudio() {
-    if (audioCtx === null) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return null;
-      audioCtx = new AC();
-    }
-    if (audioCtx.state === "suspended") audioCtx.resume();
-    return audioCtx;
+  let audioUnlocked = false;
+  function unlockAudio() {
+    if (audioUnlocked) return;
+    audioUnlocked = true;
+    // 静音播放一次再立刻暂停，用这次用户手势换取后续自动播放的许可
+    Object.values(SOUNDS).forEach((a) => {
+      const p = a.play();
+      if (p && p.then) p.then(() => { a.pause(); a.currentTime = 0; }).catch(() => {});
+    });
   }
+  document.addEventListener("pointerdown", unlockAudio, { once: true });
+  document.addEventListener("keydown", unlockAudio, { once: true });
 
-  function makeNoiseBuffer(ctx, seconds) {
-    const length = Math.floor(ctx.sampleRate * seconds);
-    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < length; i++) {
-      // 越往后越弱，模拟撞击后的快速衰减
-      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 2.5);
-    }
-    return buffer;
-  }
-
-  function playMoveSound() {
-    const ctx = ensureAudio();
-    if (!ctx) return;
-    const now = ctx.currentTime;
-
-    // 低频"咚"——木头的实心感
-    const osc = ctx.createOscillator();
-    const oscGain = ctx.createGain();
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(180, now);
-    osc.frequency.exponentialRampToValueAtTime(90, now + 0.09);
-    oscGain.gain.setValueAtTime(0.34, now);
-    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
-    osc.connect(oscGain).connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.12);
-
-    // 一点点噪声，模拟木片接触桌面的"嗒"
-    const noise = ctx.createBufferSource();
-    noise.buffer = makeNoiseBuffer(ctx, 0.05);
-    const noiseFilter = ctx.createBiquadFilter();
-    noiseFilter.type = "lowpass";
-    noiseFilter.frequency.value = 2200;
-    const noiseGain = ctx.createGain();
-    noiseGain.gain.setValueAtTime(0.16, now);
-    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-    noise.connect(noiseFilter).connect(noiseGain).connect(ctx.destination);
-    noise.start(now);
-  }
-
-  function playCaptureSound() {
-    const ctx = ensureAudio();
-    if (!ctx) return;
-    const now = ctx.currentTime;
-
-    // 明亮粗糙的噪声爆发——石头碎裂
-    const noise = ctx.createBufferSource();
-    noise.buffer = makeNoiseBuffer(ctx, 0.16);
-    const bp = ctx.createBiquadFilter();
-    bp.type = "bandpass";
-    bp.frequency.setValueAtTime(2600, now);
-    bp.frequency.exponentialRampToValueAtTime(900, now + 0.15);
-    bp.Q.value = 0.8;
-    const noiseGain = ctx.createGain();
-    noiseGain.gain.setValueAtTime(0.42, now);
-    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.17);
-    noise.connect(bp).connect(noiseGain).connect(ctx.destination);
-    noise.start(now);
-
-    // 底下垫一层低频冲击，让"敲碎"更有重量
-    const osc = ctx.createOscillator();
-    const oscGain = ctx.createGain();
-    osc.type = "triangle";
-    osc.frequency.setValueAtTime(150, now);
-    osc.frequency.exponentialRampToValueAtTime(60, now + 0.12);
-    oscGain.gain.setValueAtTime(0.3, now);
-    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
-    osc.connect(oscGain).connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.15);
+  function playSound(key) {
+    const base = SOUNDS[key];
+    if (!base) return;
+    const clip = base.cloneNode();   // 克隆播放，避免连续走棋时互相打断
+    clip.volume = base.volume;
+    const p = clip.play();
+    if (p && p.catch) p.catch(() => {});   // 还没解锁时静默失败，不打断下棋
   }
 
   // -------------------------------------------------------------------
@@ -771,20 +695,26 @@
       ctx.stroke();
     }
 
-    // 坐标标签
-    ctx.fillStyle = COLORS.ink;
-    ctx.font = "13px Consolas, monospace";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    for (let c = 0; c < COLS.length; c++) {
-      const displayCol = boardFlipped ? (COLS.length - 1 - c) : c;
-      const x = MARGIN + displayCol * CELL + CELL / 2;
-      ctx.fillText(COLS[c], x, MARGIN + (MAX_ROW - MIN_ROW + 1) * CELL + 14);
-    }
-    ctx.textAlign = "right";
+    // 坐标标签：直接画在棋盘格内（不再有外框）
+    //   纵坐标 -> 最左一列格子的左上角
+    //   横坐标 -> 最底一行格子的右上角
+    ctx.fillStyle = "rgba(60, 52, 36, 0.62)";
+    ctx.font = "bold 11px Consolas, monospace";
+
+    const leftmostCol = boardFlipped ? (COLS.length - 1) : 0;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
     for (let row = MIN_ROW; row <= MAX_ROW; row++) {
-      const [, y] = squareTopLeft(0, row);
-      ctx.fillText(String(row), MARGIN - 7, y + CELL / 2);
+      const [x, y] = squareTopLeft(leftmostCol, row);
+      ctx.fillText(String(row), x + 3, y + 3);
+    }
+
+    const bottomRow = boardFlipped ? MAX_ROW : MIN_ROW;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    for (let c = 0; c < COLS.length; c++) {
+      const [x, y] = squareTopLeft(c, bottomRow);
+      ctx.fillText(COLS[c], x + CELL - 3, y + 3);
     }
 
     if (selected) highlightSquare(selected, COLORS.gold, 3);
@@ -792,8 +722,6 @@
       const occupied = !!boardState[sq];
       drawMoveHint(sq, occupied);
     });
-
-    drawCornerBrackets();
 
     Object.entries(boardState).forEach(([sq, info]) => {
       // 正在做移动动画的那枚棋子，先不画在终点格，等下按动画位置画
@@ -863,16 +791,36 @@
     }
   }
 
+  /**
+   * 重算每格棋子的朝向。
+   * 规则：一般按显示位置定（左半屏朝右、右半屏朝左，始终朝向屏幕中心）；
+   * 走到正中 f 线的棋子不翻面——继承它从哪一格来的朝向。
+   */
+  function updateOrientations(board, fromSq, toSq) {
+    const P = window.ArkatanaPieces;
+    if (!P) return;
+    const next = {};
+    Object.keys(board).forEach((sq) => {
+      // 这一步刚落到 f 线的棋子，把起点格的朝向带过来
+      let sticky = orientationBySquare[sq];
+      if (toSq === sq && fromSq && orientationBySquare[fromSq]) {
+        sticky = orientationBySquare[fromSq];
+      }
+      next[sq] = P.resolveVariant(sq, boardFlipped, sticky);
+    });
+    orientationBySquare = next;
+  }
+
   function drawPiece(sq, info, overrideCenter) {
     const [cx, cy] = overrideCenter || squareToPixelCenter(sq);
     const P = window.ArkatanaPieces;
     // 按棋子在屏幕上的显示位置选左版/右版素材（跟视角翻转联动），
-    // 动画中的棋子用终点格，这样飞行途中不会突然翻面
-    const img = P ? P.getImage(info.piece, info.side, sq, boardFlipped) : null;
+    // 走到正中 f 线时沿用原朝向，不突兀翻面
+    const img = P ? P.getImage(info.piece, info.side, sq, boardFlipped, orientationBySquare[sq]) : null;
 
     if (img) {
-      // 素材是正方形画布里的居中造型，按格子等比缩放画上去
-      const size = CELL * 0.9;
+      // 素材是正方形画布里的居中造型，按各棋子的比例等比缩放画上去
+      const size = CELL * (P ? P.pieceScale(info.piece) : 0.9);
       ctx.drawImage(img, cx - size / 2, cy - size / 2, size, size);
 
       if (info.promoted) {
@@ -909,25 +857,6 @@
     ctx.fillText(info.symbol || "?", cx, cy + 1);
   }
 
-  function drawCornerBrackets() {
-    const w = canvas.width, h = canvas.height;
-    const len = 16, off = 5;
-    ctx.strokeStyle = COLORS.gold;
-    ctx.lineWidth = 2;
-    const corners = [
-      [[off, off + len], [off, off], [off + len, off]],
-      [[w - off - len, off], [w - off, off], [w - off, off + len]],
-      [[off, h - off - len], [off, h - off], [off + len, h - off]],
-      [[w - off - len, h - off], [w - off, h - off], [w - off, h - off - len]],
-    ];
-    corners.forEach((pts) => {
-      ctx.beginPath();
-      ctx.moveTo(pts[0][0], pts[0][1]);
-      ctx.lineTo(pts[1][0], pts[1][1]);
-      ctx.lineTo(pts[2][0], pts[2][1]);
-      ctx.stroke();
-    });
-  }
 
   // -------------------------------------------------------------------
   // 吃子栏
@@ -954,10 +883,14 @@
   function renderCapturedRow(elId, pieces, capturedSide) {
     const el = document.getElementById(elId);
     el.innerHTML = "";
+    const P = window.ArkatanaPieces;
     pieces.forEach((type) => {
-      const chip = document.createElement("div");
-      chip.className = "piece-chip " + capturedSide + (type === "" ? " pawn-chip" : "");
-      chip.textContent = PIECE_SYMBOLS[type];
+      // 用真正的棋子造型渲染，不再用圆形图案
+      const path = P ? P.pieceImagePath(type, capturedSide, "a1", false) : null;
+      const chip = document.createElement("img");
+      chip.className = "piece-chip" + (type === "" ? " pawn-chip" : "");
+      if (path) chip.src = path;
+      chip.alt = PIECE_SYMBOLS[type];
       chip.title = PIECE_SYMBOLS[type];
       el.appendChild(chip);
     });
@@ -1245,23 +1178,8 @@
   }
 
   function renderAuthStatus() {
-    if (authUsername) {
-      authStatusEl.innerHTML = `已登录：<b style="color:var(--gold)">${authUsername}</b>`;
-      authStatusMiniEl.textContent = authUsername;
-      authUsernameInput.style.display = "none";
-      authPasswordInput.style.display = "none";
-      btnLogin.style.display = "none";
-      btnRegister.style.display = "none";
-      btnLogout.style.display = "block";
-    } else {
-      authStatusEl.textContent = "未登录（可以匿名对局）";
-      authStatusMiniEl.textContent = "未登录";
-      authUsernameInput.style.display = "block";
-      authPasswordInput.style.display = "block";
-      btnLogin.style.display = "block";
-      btnRegister.style.display = "block";
-      btnLogout.style.display = "none";
-    }
+    // 对局界面只在顶栏显示当前身份，不再放登录表单
+    authStatusMiniEl.textContent = authUsername || "未登录";
   }
 
   function setAuth(token, username) {
@@ -1276,30 +1194,6 @@
     }
     renderAuthStatus();
   }
-
-  btnLogin.addEventListener("click", async () => {
-    const username = authUsernameInput.value.trim();
-    const password = authPasswordInput.value;
-    if (!username || !password) { setMessage("请输入用户名和密码"); return; }
-    try {
-      const data = await apiPost("/login", { username, password });
-      setAuth(data.token, data.username);
-      authPasswordInput.value = "";
-      setMessage(`登录成功，欢迎 ${data.username}`);
-    } catch (err) { setMessage("登录失败：" + err.message); }
-  });
-
-  btnRegister.addEventListener("click", async () => {
-    const username = authUsernameInput.value.trim();
-    const password = authPasswordInput.value;
-    if (!username || !password) { setMessage("请输入用户名和密码"); return; }
-    try {
-      const data = await apiPost("/register", { username, password });
-      setMessage(`注册成功（${data.username}），现在可以登录了`);
-    } catch (err) { setMessage("注册失败：" + err.message); }
-  });
-
-  btnLogout.addEventListener("click", () => { setAuth(null, null); setMessage("已登出"); });
 
   // -------------------------------------------------------------------
   // 棋钟
@@ -1400,20 +1294,28 @@
     return { fromSq, toSq, movingInfo, capturedInfo };
   }
 
-  function startMoveAnimation(detected) {
+  function startMoveAnimation(detected, movedSide, nowInCheck) {
     anim = { ...detected, startedAt: performance.now() };
     if (animRaf) cancelAnimationFrame(animRaf);
+
+    // 音效在动画"开始"时就播，跟视觉同步；放在动画结束才播会明显滞后，
+    // 而且之前己方走棋常常听不到声音，就是因为等到动画结束时状态已被覆盖。
+    if (nowInCheck) {
+      playSound("check");            // 将军/将杀优先提示
+    } else if (detected.capturedInfo) {
+      playSound("capture");
+    } else {
+      playSound(movedSide && mySide && movedSide === mySide ? "moveSelf" : "moveOther");
+    }
 
     const step = () => {
       const elapsed = performance.now() - anim.startedAt;
       if (elapsed >= ANIM_MS) {
         // 动画结束：被吃的棋子此刻才消失（规格要求"待移动动画走完后瞬间消失"）
-        const wasCapture = !!anim.capturedInfo;
         anim = null;
         animRaf = null;
         drawBoard();
         renderCaptured();
-        if (wasCapture) playCaptureSound(); else playMoveSound();
         return;
       }
       drawBoard();
@@ -1433,6 +1335,7 @@
     lastMoveTo = state.last_move_to || null;
     currentStateRated = !!state.rated;
     legalMovesMap = state.legal_moves || {};
+    updateOrientations(state.board, lastMoveFrom, lastMoveTo);
     if (state.my_side !== undefined && state.my_side !== null) mySide = state.my_side;
     boardFlipped = mySide === "white" || (!mySide && !!(authUsername && state.white_player === authUsername));
 
@@ -1451,7 +1354,9 @@
     prevBoardState = boardState;
 
     if (detected) {
-      startMoveAnimation(detected);
+      // 走这步的是刚才那一方（现在轮到对面了），据此判断该播己方还是对方音效
+      const movedSide = currentSide === "black" ? "white" : "black";
+      startMoveAnimation(detected, movedSide, inCheck);
     } else {
       anim = null;
       drawBoard();
@@ -1465,8 +1370,6 @@
     renderResultPanel(state);
     tickClocks();
 
-    const stillWaiting = !!state.time_control && !state.clock_started && state.result === "ongoing";
-    waitingPanelEl.style.display = stillWaiting ? "block" : "none";
   }
 
   async function newGame() {
@@ -1567,13 +1470,6 @@
     }
   });
 
-  document.getElementById("btn-start-game").addEventListener("click", async () => {
-    try {
-      const state = await apiPost(`/games/${gameId}/start`);
-      handleIncomingState(state);
-      setMessage("对局已开始！");
-    } catch (err) { setMessage("开始对局失败：" + err.message); }
-  });
 
   // -------------------------------------------------------------------
   // 启动：根据网址参数决定进入什么模式
