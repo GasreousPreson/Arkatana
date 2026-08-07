@@ -567,6 +567,7 @@
   let gameResult = "ongoing";
   let selected = null;
   let legalDestinations = [];
+  let legalMovesMap = {};     // 当前行棋方全部合法走法：{起点: [终点,...]}，随状态更新
   let historyEntries = [];
   let boardFlipped = false;
   let mySide = null;          // "black" | "white" | null（我在这局里是哪一方；null=旁观/身份未知）
@@ -865,9 +866,9 @@
   function drawPiece(sq, info, overrideCenter) {
     const [cx, cy] = overrideCenter || squareToPixelCenter(sq);
     const P = window.ArkatanaPieces;
-    // 用棋子"当前所在格"选左版/右版素材；动画中的棋子用终点格，
-    // 这样飞行途中不会因为跨过中线而突然翻面
-    const img = P ? P.getImage(info.piece, info.side, sq) : null;
+    // 按棋子在屏幕上的显示位置选左版/右版素材（跟视角翻转联动），
+    // 动画中的棋子用终点格，这样飞行途中不会突然翻面
+    const img = P ? P.getImage(info.piece, info.side, sq, boardFlipped) : null;
 
     if (img) {
       // 素材是正方形画布里的居中造型，按格子等比缩放画上去
@@ -1136,6 +1137,7 @@
     boardFlipped = false;
     selected = null;
     legalDestinations = [];
+    legalMovesMap = {};   // 复盘是只读浏览，清掉走法表避免误用上一局的残留
     lastMoveFrom = null;
     lastMoveTo = null;
     inCheck = false;
@@ -1430,6 +1432,7 @@
     lastMoveFrom = state.last_move_from || null;
     lastMoveTo = state.last_move_to || null;
     currentStateRated = !!state.rated;
+    legalMovesMap = state.legal_moves || {};
     if (state.my_side !== undefined && state.my_side !== null) mySide = state.my_side;
     boardFlipped = mySide === "white" || (!mySide && !!(authUsername && state.white_player === authUsername));
 
@@ -1519,7 +1522,7 @@
     }
   }
 
-  async function selectSquare(sq) {
+  function selectSquare(sq) {
     const info = boardState[sq];
     if (!info || info.side !== currentSide) {
       selected = null; legalDestinations = []; drawBoard(); return;
@@ -1529,9 +1532,10 @@
       setMessage("王城不可移动");
       return;
     }
-    const data = await apiGet(`/games/${gameId}/legal-moves?coord=${sq}`);
+    // 合法走法在每次状态更新时已经全量拿到了，这里直接本地查表——
+    // 不再发请求，所以点选棋子是零延迟的
     selected = sq;
-    legalDestinations = data.legal_destinations;
+    legalDestinations = legalMovesMap[sq] || [];
     drawBoard();
     setMessage(legalDestinations.length === 0 ? `${sq} 这个棋子当前没有合法走法（可能被将军钉住了）。` : "");
   }

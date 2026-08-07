@@ -223,6 +223,14 @@ def game_state(game_id: str, game: Game) -> dict:
 
     last_move_record = game.move_log[-1] if game.move_log else None
 
+    # 当前行棋方每颗棋子各自能走到哪些格子，一次性全给前端。
+    # 这样点选棋子时可以本地查表立刻高亮，不用每次点击都往返一次服务器——
+    # 对跨国访问来说，省掉的这次往返就是"点一下卡一下"的主要来源。
+    # 代价只是响应体稍大一点，比多次往返划算得多。
+    legal_map: dict[str, list[str]] = {}
+    for move in game.legal_moves():
+        legal_map.setdefault(coord_to_str(*move.from_sq), []).append(coord_to_str(*move.to_sq))
+
     return {
         "game_id": game_id,
         "current_side": game.current_side.value,
@@ -235,6 +243,7 @@ def game_state(game_id: str, game: Game) -> dict:
         "clock_started": game.clock.active_side is not None,
         "in_check": is_in_check(game.board, game.current_side) if game.result.value == "ongoing" else False,
         "pending_offer": GAME_OFFERS.get(game_id),
+        "legal_moves": legal_map,
         "last_move_from": coord_to_str(*last_move_record.from_sq) if last_move_record else None,
         "last_move_to": coord_to_str(*last_move_record.to_sq) if last_move_record else None,
         **time_info,
