@@ -41,7 +41,7 @@ import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Float, Boolean, UniqueConstraint, select, or_, func
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Float, Boolean, UniqueConstraint, select, or_, and_, func
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from game import Game
@@ -502,6 +502,8 @@ def list_user_games(username: str, limit: int = 20, session_factory=None) -> lis
 
 def search_games(
     player: str | None = None,
+    opponent: str | None = None,
+    rated: bool | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 20,
@@ -513,6 +515,12 @@ def search_games(
 
     - player: 按棋手用户名做子串匹配（不分大小写），黑方或白方命中都算；
       留空则不限定棋手。
+    - opponent: 同时指定时，要求 player 和 opponent 分别落在黑白两方
+      （不限定谁执黑谁执白，A执黑B执白、或B执黑A执白都算命中）——
+      用于查"这两个人之间下过的对局"。只填 opponent 不填 player 时，
+      效果等同于只填了 player（毕竟"对手是谁"离开"我是谁"没有意义，
+      这种情况按 opponent 当 player 处理）。
+    - rated: True 只要排位、False 只要 casual、None（默认）不限定模式。
     - date_from / date_to: 按对局"最后更新时间"过滤，格式 "YYYY-MM-DD"
       （闭区间：date_from 当天 00:00 到 date_to 当天 24:00 都算在内）；
       留空则不限定这一头。
@@ -525,12 +533,22 @@ def search_games(
     with factory() as session:
         conditions = [GameRecord.result != "ongoing"]
 
-        if player:
-            pattern = f"%{player}%"
+        if player and opponent:
+            # 两人分别落在黑白两方，不限定谁执黑谁执白
+            p1, p2 = f"%{player}%", f"%{opponent}%"
+            conditions.append(or_(
+                and_(GameRecord.black_player.ilike(p1), GameRecord.white_player.ilike(p2)),
+                and_(GameRecord.black_player.ilike(p2), GameRecord.white_player.ilike(p1)),
+            ))
+        elif player or opponent:
+            pattern = f"%{player or opponent}%"
             conditions.append(or_(
                 GameRecord.black_player.ilike(pattern),
                 GameRecord.white_player.ilike(pattern),
             ))
+
+        if rated is not None:
+            conditions.append(GameRecord.rated == rated)
 
         if date_from:
             start = datetime.fromisoformat(date_from)
@@ -1530,6 +1548,30 @@ if __name__ == "__main__":
     combined = search_games(player="salvador", date_from="2024-01-01", session_factory=test_session_factory)
     combined_ids = {g["game_id"] for g in combined["games"]}
     assert combined_ids == {"db_search_1"}, f"组合过滤结果异常: {combined_ids}"
+
+    # opponent：两人分别落在黑白两方，不限定谁执黑谁执白
+    db_g4 = Game()
+    db_g4.resign(_Side.BLACK)
+    save_game("db_search_4", db_g4, black_player="Alice", white_player="Bob", rated=True,
+              session_factory=test_session_factory)
+    db_g5 = Game()
+    db_g5.resign(_Side.BLACK)
+    save_game("db_search_5", db_g5, black_player="Bob", white_player="Alice", rated=False,
+              session_factory=test_session_factory)
+    db_g6 = Game()  # Alice 对第三个人，不该被 Alice+Bob 的搜索命中
+    db_g6.resign(_Side.BLACK)
+    save_game("db_search_6", db_g6, black_player="Alice", white_player="Charlie",
+              session_factory=test_session_factory)
+
+    ab_result = search_games(player="Alice", opponent="Bob", session_factory=test_session_factory)
+    ab_ids = {g["game_id"] for g in ab_result["games"]}
+    assert ab_ids == {"db_search_4", "db_search_5"}, f"Alice+Bob对局搜索异常: {ab_ids}"
+
+    # rated 模式筛选
+    rated_only = search_games(player="Alice", opponent="Bob", rated=True, session_factory=test_session_factory)
+    assert {g["game_id"] for g in rated_only["games"]} == {"db_search_4"}
+    casual_only = search_games(player="Alice", opponent="Bob", rated=False, session_factory=test_session_factory)
+    assert {g["game_id"] for g in casual_only["games"]} == {"db_search_5"}
 
     # 分页：limit=1 时只返回1条，但 total 应该反映真实的匹配总数
     paged = search_games(player="salvador", limit=1, session_factory=test_session_factory)

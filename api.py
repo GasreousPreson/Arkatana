@@ -950,6 +950,32 @@ def get_lobby(limit: int = 20):
     return {"rooms": db.list_open_rooms(limit=limit)}
 
 
+@app.get("/database/search")
+def search_database(
+    player: str | None = None,
+    opponent: str | None = None,
+    rated: bool | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """
+    搜索全站对局库（"Database" 页面用这个）。公开接口，不需要登录——
+    浏览已经结束的对局本来就是开放给所有人的功能。
+    参数含义详见 db.search_games 的说明；日期格式必须是 "YYYY-MM-DD"，
+    格式不对会返回 400。
+    """
+    try:
+        return db.search_games(
+            player=player, opponent=opponent, rated=rated,
+            date_from=date_from, date_to=date_to,
+            limit=min(limit, 100), offset=max(offset, 0),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"日期格式不对，请用 YYYY-MM-DD: {e}")
+
+
 @app.get("/games")
 def list_games(limit: int = 20):
     """列出最近更新过的对局摘要（内部/管理用途，不是网页首页"Game History"用的那个）"""

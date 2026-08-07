@@ -738,7 +738,7 @@
   // 未开放功能的占位提示（Learn / Puzzle / Watch / 好友对战 / AI / 侧边栏其他项）
   // -------------------------------------------------------------------
   document.querySelectorAll("[data-name]").forEach((el) => {
-    const enabledNow = ["play"]; // 目前唯一真正有实际功能的导航项
+    const enabledNow = ["play", "database"]; // 已经有实际功能的导航项
     const name = el.dataset.name;
     if (enabledNow.includes(name)) return;
     el.addEventListener("click", (e) => {
@@ -746,6 +746,7 @@
       showToast("这个功能还在开发中，敬请期待");
     });
   });
+  document.querySelector('[data-name="database"]').setAttribute("href", "database.html");
 
   // -------------------------------------------------------------------
   // Lobby
