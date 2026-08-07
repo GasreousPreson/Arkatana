@@ -38,10 +38,10 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Float, Boolean, UniqueConstraint, select, or_
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Float, Boolean, UniqueConstraint, select, or_, func
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from game import Game
@@ -456,6 +456,23 @@ def delete_game(game_id: str, session_factory=None) -> bool:
         return True
 
 
+def _game_summary(r: "GameRecord") -> dict:
+    """把一条 GameRecord 转成对局摘要字典——列表类接口共用同一份字段。"""
+    return {
+        "game_id": r.game_id,
+        "result": r.result,
+        "current_side": r.current_side,
+        "move_count": r.move_count,
+        "black_player": r.black_player,
+        "white_player": r.white_player,
+        "rated": r.rated,
+        "time_control_minutes": r.time_control_minutes,
+        "time_control_increment": r.time_control_increment,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+
+
 def list_recent_games(limit: int = 20, session_factory=None) -> list[dict]:
     """列出最近更新过的对局摘要（内部/管理用途；网页首页的"对局历史"用的是 list_user_games）"""
     factory = session_factory or SessionLocal
@@ -463,30 +480,14 @@ def list_recent_games(limit: int = 20, session_factory=None) -> list[dict]:
         records = session.execute(
             select(GameRecord).order_by(GameRecord.updated_at.desc()).limit(limit)
         ).scalars().all()
-
-        return [
-            {
-                "game_id": r.game_id,
-                "result": r.result,
-                "current_side": r.current_side,
-                "move_count": r.move_count,
-                "black_player": r.black_player,
-                "white_player": r.white_player,
-                "rated": r.rated,
-                "time_control_minutes": r.time_control_minutes,
-                "time_control_increment": r.time_control_increment,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
-            }
-            for r in records
-        ]
+        return [_game_summary(r) for r in records]
 
 
 def list_user_games(username: str, limit: int = 20, session_factory=None) -> list[dict]:
     """
     列出某个用户自己参与过的对局（不管黑方还是白方），按最近更新排序。
     用于网页首页"Game History"——只显示"我自己下过的棋"，
-    不是全站对局流水账（那是以后 database 功能的事）。
+    不是全站对局流水账（那是 database 功能的事，见 search_games）。
     """
     factory = session_factory or SessionLocal
     with factory() as session:
@@ -496,23 +497,63 @@ def list_user_games(username: str, limit: int = 20, session_factory=None) -> lis
             .order_by(GameRecord.updated_at.desc())
             .limit(limit)
         ).scalars().all()
+        return [_game_summary(r) for r in records]
 
-        return [
-            {
-                "game_id": r.game_id,
-                "result": r.result,
-                "current_side": r.current_side,
-                "move_count": r.move_count,
-                "black_player": r.black_player,
-                "white_player": r.white_player,
-                "rated": r.rated,
-                "time_control_minutes": r.time_control_minutes,
-                "time_control_increment": r.time_control_increment,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
-            }
-            for r in records
-        ]
+
+def search_games(
+    player: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    session_factory=None,
+) -> dict:
+    """
+    搜索全站对局库（"database" 功能用这个，不同于 list_user_games 只查自己）。
+
+    - player: 按棋手用户名做子串匹配（不分大小写），黑方或白方命中都算；
+      留空则不限定棋手。
+    - date_from / date_to: 按对局"最后更新时间"过滤，格式 "YYYY-MM-DD"
+      （闭区间：date_from 当天 00:00 到 date_to 当天 24:00 都算在内）；
+      留空则不限定这一头。
+    - 只收录**已经结束**的对局（result != "ongoing"）——数据库是给人回顾
+      "已经发生过的对局"用的，进行中的对局不适合被任意搜索/围观到。
+    - 返回 {"games": [...], "total": 匹配总数}，total 用于前端做分页
+      （因为 limit/offset 只是这一页，需要知道总共有多少条才能画分页控件）。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        conditions = [GameRecord.result != "ongoing"]
+
+        if player:
+            pattern = f"%{player}%"
+            conditions.append(or_(
+                GameRecord.black_player.ilike(pattern),
+                GameRecord.white_player.ilike(pattern),
+            ))
+
+        if date_from:
+            start = datetime.fromisoformat(date_from)
+            conditions.append(GameRecord.updated_at >= start)
+
+        if date_to:
+            # 加一天再用"小于"，让 date_to 当天全天都算在范围内
+            end = datetime.fromisoformat(date_to) + timedelta(days=1)
+            conditions.append(GameRecord.updated_at < end)
+
+        total = session.execute(
+            select(func.count()).select_from(GameRecord).where(*conditions)
+        ).scalar_one()
+
+        records = session.execute(
+            select(GameRecord)
+            .where(*conditions)
+            .order_by(GameRecord.updated_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).scalars().all()
+
+        return {"games": [_game_summary(r) for r in records], "total": total}
 
 
 def list_open_rooms(limit: int = 20, session_factory=None) -> list[dict]:
@@ -1436,6 +1477,64 @@ if __name__ == "__main__":
         raise AssertionError("根节点不应该能被删除")
     except ValueError:
         pass
+
+    # 13) 对局库搜索（search_games）
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from pieces import Side as _Side
+
+    # 造几局不同棋手、不同结果、不同"更新时间"的对局，覆盖各种过滤条件
+    db_g1 = Game()
+    db_g1.resign(_Side.BLACK)  # 让它有个明确的 result，不是 ongoing
+    save_game("db_search_1", db_g1, black_player="Salvador", white_player="KaiWen",
+              session_factory=test_session_factory)
+
+    db_g2 = Game()
+    db_g2.resign(_Side.WHITE)
+    save_game("db_search_2", db_g2, black_player="Vesper", white_player="salvador_alt",
+              session_factory=test_session_factory)
+
+    db_g3 = Game()  # 故意不认输，保持 ongoing —— 应该被排除在搜索结果之外
+    save_game("db_search_3", db_g3, black_player="Salvador", white_player="Nobody",
+              session_factory=test_session_factory)
+
+    # 手动改一条记录的 updated_at，制造一个"很久以前"的对局，用于测试日期范围过滤
+    with test_session_factory() as _session:
+        _old_record = _session.execute(
+            select(GameRecord).where(GameRecord.game_id == "db_search_2")
+        ).scalar_one()
+        _old_record.updated_at = _dt(2020, 1, 1, tzinfo=_tz.utc)
+        _session.commit()
+
+    # 不加任何过滤：应该只有两局（db_search_3 是 ongoing，排除在外）
+    all_result = search_games(session_factory=test_session_factory)
+    all_ids = {g["game_id"] for g in all_result["games"]}
+    assert "db_search_1" in all_ids and "db_search_2" in all_ids
+    assert "db_search_3" not in all_ids, "进行中的对局不应该出现在database搜索结果里"
+    assert all_result["total"] >= 2
+
+    # 按棋手名子串搜索，且不分大小写：搜 "salvador" 应该同时命中
+    # "Salvador"（大写开头）和 "salvador_alt"（子串在中间）
+    by_player = search_games(player="salvador", session_factory=test_session_factory)
+    player_ids = {g["game_id"] for g in by_player["games"]}
+    assert "db_search_1" in player_ids, "大小写不敏感的子串匹配应该命中 Salvador"
+    assert "db_search_2" in player_ids, "子串匹配应该命中 salvador_alt"
+    assert "db_search_3" not in player_ids, "搜索结果依然要排除ongoing对局"
+
+    # 按日期范围过滤：只要"最近"的，应该筛掉那条被改成2020年的记录
+    recent_only = search_games(date_from="2024-01-01", session_factory=test_session_factory)
+    recent_ids = {g["game_id"] for g in recent_only["games"]}
+    assert "db_search_1" in recent_ids
+    assert "db_search_2" not in recent_ids, "2020年的旧记录应该被date_from筛掉"
+
+    # 组合条件：棋手名 + 日期范围都限定，只剩 db_search_1
+    combined = search_games(player="salvador", date_from="2024-01-01", session_factory=test_session_factory)
+    combined_ids = {g["game_id"] for g in combined["games"]}
+    assert combined_ids == {"db_search_1"}, f"组合过滤结果异常: {combined_ids}"
+
+    # 分页：limit=1 时只返回1条，但 total 应该反映真实的匹配总数
+    paged = search_games(player="salvador", limit=1, session_factory=test_session_factory)
+    assert len(paged["games"]) == 1
+    assert paged["total"] == 2, "total应该是全部匹配数，不受limit影响"
 
     print("db.py 自检全部通过 ✅")
 
