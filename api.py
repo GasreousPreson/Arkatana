@@ -51,6 +51,7 @@ from google.auth.transport import requests as google_requests
 from board import parse_coord, coord_to_str
 from pieces import Side, Throne
 from game import Game, IllegalMoveError, GameOverError
+from layout import setup_initial_board
 from notation import format_game, move_notation, position_string_to_board
 from rules import is_in_check, GameResult
 from clock import TimeControl
@@ -1007,8 +1008,13 @@ def get_replay(game_id: str):
                 "move_number": step["move_number"],
                 "side": step["side"],
                 "notation": step["notation"],
+                "from_sq": step.get("from_sq"),
+                "to_sq": step.get("to_sq"),
                 "board": board_to_json(board),
             })
+        # 第0步（还没走任何棋）的初始局面也要给前端——
+        # 浏览历史时"回到最开始"需要它，光有每步之后的局面是不够的
+        initial_board = board_to_json(setup_initial_board())
     except Exception as e:
         # 常见原因：这局对局是用旧版记谱格式存的，现在的解析器读不懂了
         # （记谱格式在开发过程中调整过，早期存的数据可能跟当前版本不兼容）
@@ -1016,7 +1022,7 @@ def get_replay(game_id: str):
             status_code=422,
             detail=f"这局对局的棋谱回放失败，可能是用旧格式存储的历史数据: {type(e).__name__}: {e}",
         )
-    return {"game_id": game_id, "steps": result}
+    return {"game_id": game_id, "initial_board": initial_board, "steps": result}
 
 
 # ---------------------------------------------------------------------------

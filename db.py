@@ -45,7 +45,7 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, F
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from game import Game
-from board import parse_coord
+from board import parse_coord, coord_to_str
 from notation import format_game, board_to_position_string, parse_move_notation, move_notation
 import rating as rating_module
 import clock as clock_module
@@ -422,6 +422,9 @@ def replay_steps(game_id: str, session_factory=None) -> list[dict]:
                 "move_number": move_number,
                 "side": side_before.value,
                 "notation": token,
+                # 起止坐标一并带上，浏览历史局面时才能正确高亮"这一步走的是哪两格"
+                "from_sq": coord_to_str(*from_sq),
+                "to_sq": coord_to_str(*to_sq),
                 "position": board_to_position_string(game.board, game.current_side),
             })
 

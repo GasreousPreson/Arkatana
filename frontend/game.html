@@ -324,6 +324,57 @@
     cursor: pointer;
   }
 
+  /* 棋谱导航：⏮ ◀ ▶ ⏭ */
+  .nav-row { display: flex; gap: 6px; }
+  .nav-btn {
+    flex: 1;
+    padding: 6px 0;
+    font-size: 13px;
+    background: var(--ink-raised);
+    color: var(--parchment-light);
+    border: 1px solid var(--gold);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .nav-btn:hover:not(:disabled) { background: rgba(184,148,75,0.25); }
+  .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* "轮到你了 / 回到当前局面" 横幅 */
+  .turn-banner {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    padding: 6px 8px;
+    border: 1px solid var(--gold);
+    border-radius: 4px;
+    background: var(--gold-soft);
+  }
+  .turn-banner button {
+    background: #4c8c4c; color: #fff; border: none;
+    border-radius: 3px; padding: 3px 12px; font-size: 13px; cursor: pointer;
+  }
+
+  /* 走子记录：可点击跳转，当前所看的那一步高亮 */
+  #history-log li span.mv {
+    cursor: pointer;
+    padding: 0 3px;
+    border-radius: 2px;
+  }
+  #history-log li span.mv:hover { background: rgba(184,148,75,0.2); }
+  #history-log li span.mv.current {
+    background: var(--gold);
+    color: var(--ink);
+    font-weight: 700;
+  }
+
+  #replay-exit-row { display: none; margin-top: 10px; text-align: center; }
+  #replay-exit-row button {
+    padding: 6px 14px; background: var(--parchment-light); color: var(--ink);
+    border: 1px solid var(--gold); border-radius: 3px; cursor: pointer;
+  }
+
   #replay-bar {
     display: none;
     margin-top: 10px;
@@ -424,11 +475,20 @@
       </div>
     </div>
 
+    <div class="nav-row">
+      <button class="nav-btn" id="btn-nav-first" title="回到开局">⏮</button>
+      <button class="nav-btn" id="btn-nav-prev"  title="上一步">◀</button>
+      <button class="nav-btn" id="btn-nav-next"  title="下一步">▶</button>
+      <button class="nav-btn" id="btn-nav-last"  title="回到最新局面">⏭</button>
+    </div>
+
     <div class="move-list-card">
       <ul id="history-log"></ul>
     </div>
 
     <div class="offer-banner" id="offer-banner"></div>
+
+    <div class="turn-banner" id="turn-banner"></div>
 
     <div id="result-panel">
       <div class="result-text" id="result-text"></div>
@@ -474,11 +534,8 @@
 
     <div id="message-line"></div>
 
-    <div id="replay-bar">
-      <button id="btn-replay-prev">◀ 上一步</button>
-      <span id="replay-position-label">- / -</span>
-      <button id="btn-replay-next">下一步 ▶</button>
-      <button id="btn-replay-exit">退出复盘</button>
+    <div id="replay-exit-row">
+      <button id="btn-replay-exit">返回首页</button>
     </div>
   </div>
 
@@ -565,9 +622,14 @@
   // 需要靠这张表把"原来的朝向"带过去。
   let orientationBySquare = {};
 
-  let replayMode = false;
-  let replaySteps = [];
-  let replayIndex = -1;
+  // 统一的"棋谱历史浏览"机制——对局中回看和复盘用的是同一套：
+  //   positionHistory[i] = 走完第 i 步之后的棋盘（i=0 就是开局初始局面）
+  //   moveMeta[i]        = 第 i 步的信息（i 从 1 开始，与 positionHistory 对齐）
+  //   viewIndex          = 当前正在看第几步；null 表示"跟着最新局面走"
+  let positionHistory = [];
+  let moveMeta = [];
+  let viewIndex = null;
+  let replayOnly = false;   // true = 纯复盘页面（没有实时对局），进来就是只读
 
   let authToken = localStorage.getItem("arkatana_token") || null;
   let authUsername = localStorage.getItem("arkatana_username") || null;
@@ -910,15 +972,36 @@
   // -------------------------------------------------------------------
   function renderHistory() {
     historyEl.innerHTML = "";
+    const current = effectiveIndex();   // 当前正在看第几步，用来高亮
     for (let i = 0; i < historyEntries.length; i += 2) {
       const num = Math.floor(i / 2) + 1;
-      const black = historyEntries[i] || "";
-      const white = historyEntries[i + 1] || "";
       const li = document.createElement("li");
-      li.innerHTML = `<span class="num">${num}.</span><span class="mv">${black}</span><span class="mv">${white}</span>`;
+
+      const numSpan = document.createElement("span");
+      numSpan.className = "num";
+      numSpan.textContent = num + ".";
+      li.appendChild(numSpan);
+
+      // 每半步都可以点击直接跳过去；棋谱下标从1开始，与 positionHistory 对齐
+      [i, i + 1].forEach((entryIdx) => {
+        const span = document.createElement("span");
+        span.className = "mv";
+        const text = historyEntries[entryIdx];
+        span.textContent = text || "";
+        if (text) {
+          const stepIndex = entryIdx + 1;
+          if (stepIndex === current) span.classList.add("current");
+          span.addEventListener("click", () => gotoIndex(stepIndex));
+        }
+        li.appendChild(span);
+      });
+
       historyEl.appendChild(li);
     }
-    historyEl.parentElement.scrollTop = historyEl.parentElement.scrollHeight;
+    // 只有跟着最新局面时才自动滚到底；正在回看历史时别把用户的视线拽走
+    if (!isBrowsingHistory()) {
+      historyEl.parentElement.scrollTop = historyEl.parentElement.scrollHeight;
+    }
   }
 
   // -------------------------------------------------------------------
@@ -1041,63 +1124,161 @@
   }
 
   // -------------------------------------------------------------------
-  // 复盘
+  // 棋谱历史浏览（对局中回看 与 复盘 共用同一套机制）
   // -------------------------------------------------------------------
-  const replayBarEl = document.getElementById("replay-bar");
-  const replayPositionLabelEl = document.getElementById("replay-position-label");
+  const turnBannerEl = document.getElementById("turn-banner");
 
-  async function startReplay(id) {
-    const data = await apiGet(`/games/${id}/replay`);
-    if (!data.steps || data.steps.length === 0) {
-      setMessage(`对局 ${id} 还没有任何走子记录，无法复盘。`);
-      return;
-    }
-    if (socket) { socket.onclose = null; socket.close(); socket = null; }
-    replayMode = true;
-    replaySteps = data.steps;
-    replayIndex = replaySteps.length - 1;
-    gameId = id;
-    replayBarEl.style.display = "flex";
-    showReplayStep();
-    setMessage(`正在复盘对局 ${id}（共 ${replaySteps.length} 步）`);
+  /** 当前正在看的是第几步（viewIndex 为 null 时就是最新一步） */
+  function effectiveIndex() {
+    const last = Math.max(0, positionHistory.length - 1);
+    return viewIndex === null ? last : Math.min(viewIndex, last);
   }
 
-  function showReplayStep() {
-    const step = replaySteps[replayIndex];
-    boardState = step.board;
-    currentSide = step.side;
-    gameResult = "ongoing";
-    boardFlipped = false;
-    selected = null;
-    legalDestinations = [];
-    legalMovesMap = {};   // 复盘是只读浏览，清掉走法表避免误用上一局的残留
-    lastMoveFrom = null;
-    lastMoveTo = null;
-    inCheck = false;
-    // 复盘是跳步浏览，不该有滑动动画；清掉可能残留的动画状态
+  /** 是否正在回看历史（而不是停在最新局面） */
+  function isBrowsingHistory() {
+    return viewIndex !== null && viewIndex < positionHistory.length - 1;
+  }
+
+  /** 跳到第 index 步；传 null 表示回到最新局面并恢复自动跟随 */
+  function gotoIndex(index) {
+    const last = Math.max(0, positionHistory.length - 1);
+    if (index === null || index >= last) {
+      viewIndex = null;
+    } else {
+      viewIndex = Math.max(0, index);
+    }
+    renderCurrentView();
+  }
+
+  /** 按当前 viewIndex 把棋盘、吃子栏、棋谱高亮、导航按钮全部刷新一遍 */
+  function renderCurrentView() {
+    const idx = effectiveIndex();
+    if (positionHistory.length === 0) return;
+
+    boardState = positionHistory[idx] || {};
+
+    // 回看历史时，高亮"这一步"走的两格；停在开局则不高亮
+    const meta = idx > 0 ? moveMeta[idx] : null;
+    lastMoveFrom = meta ? meta.from_sq : null;
+    lastMoveTo = meta ? meta.to_sq : null;
+
+    // 回看历史时不显示将军红光（那是针对最新局面的判断），也不能选子
+    if (isBrowsingHistory()) {
+      inCheck = false;
+      selected = null;
+      legalDestinations = [];
+    }
+
+    // 跳步浏览不该有滑动动画，清掉可能残留的动画状态
     anim = null;
     if (animRaf) { cancelAnimationFrame(animRaf); animRaf = null; }
     prevBoardState = boardState;
+
     drawBoard();
     renderCaptured();
-    replayPositionLabelEl.textContent = `第 ${replayIndex + 1} / ${replaySteps.length} 步：${step.notation}`;
+    renderHistory();
+    renderNavButtons();
+    renderTurnBanner();
   }
 
-  function exitReplay() {
-    replayMode = false;
-    replaySteps = [];
-    replayIndex = -1;
-    replayBarEl.style.display = "none";
+  function renderNavButtons() {
+    const idx = effectiveIndex();
+    const last = Math.max(0, positionHistory.length - 1);
+    document.getElementById("btn-nav-first").disabled = idx <= 0;
+    document.getElementById("btn-nav-prev").disabled = idx <= 0;
+    document.getElementById("btn-nav-next").disabled = idx >= last;
+    document.getElementById("btn-nav-last").disabled = idx >= last;
+  }
+
+  /**
+   * 回看历史时提示"可以回到当前局面"。
+   * 轮到自己走棋时用规格里的 "its your turn now" 文案，
+   * 否则只提示可以回到最新局面（这时候说"轮到你了"是不准确的）。
+   */
+  function renderTurnBanner() {
+    if (replayOnly || !isBrowsingHistory() || gameResult !== "ongoing") {
+      turnBannerEl.style.display = "none";
+      turnBannerEl.innerHTML = "";
+      return;
+    }
+    const myTurn = mySide && currentSide === mySide;
+    turnBannerEl.style.display = "flex";
+    turnBannerEl.innerHTML = `<span>${myTurn ? "its your turn now" : "已回看历史局面"}</span>`;
+    const btn = document.createElement("button");
+    btn.textContent = "→";
+    btn.title = "回到当前进行中的局面";
+    btn.addEventListener("click", () => gotoIndex(null));
+    turnBannerEl.appendChild(btn);
+  }
+
+  document.getElementById("btn-nav-first").addEventListener("click", () => gotoIndex(0));
+  document.getElementById("btn-nav-prev").addEventListener("click", () => gotoIndex(effectiveIndex() - 1));
+  document.getElementById("btn-nav-next").addEventListener("click", () => gotoIndex(effectiveIndex() + 1));
+  document.getElementById("btn-nav-last").addEventListener("click", () => gotoIndex(null));
+
+  // 键盘左右方向键也能翻棋谱，浏览长对局时顺手
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); gotoIndex(effectiveIndex() - 1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); gotoIndex(effectiveIndex() + 1); }
+    else if (e.key === "Home") { e.preventDefault(); gotoIndex(0); }
+    else if (e.key === "End") { e.preventDefault(); gotoIndex(null); }
+  });
+
+  /** 从后端拉取整局的每步局面，填充 positionHistory / moveMeta */
+  async function loadHistoryPositions(id) {
+    const data = await apiGet(`/games/${id}/replay`);
+    positionHistory = [data.initial_board || {}];
+    moveMeta = [null];   // 下标与 positionHistory 对齐，第0项占位
+    (data.steps || []).forEach((step) => {
+      positionHistory.push(step.board);
+      moveMeta.push({
+        notation: step.notation,
+        side: step.side,
+        from_sq: step.from_sq,
+        to_sq: step.to_sq,
+      });
+    });
+    historyEntries = moveMeta.slice(1).map((m) => m.notation);
+  }
+
+  /** 纯复盘模式：只读浏览一局已经结束的对局 */
+  async function startReplay(id) {
+    replayOnly = true;
+    gameId = id;
+    gameIdChip.textContent = "对局: " + id;
+    if (socket) { socket.onclose = null; socket.close(); socket = null; }
+
+    try {
+      await loadHistoryPositions(id);
+    } catch (err) {
+      setMessage("复盘加载失败：" + err.message);
+      return;
+    }
+    if (positionHistory.length <= 1) {
+      setMessage(`对局 ${id} 还没有任何走子记录，无法复盘。`);
+      return;
+    }
+
+    // 复盘也要显示双方是谁、时间控制等信息
+    try {
+      const state = await apiGet(`/games/${id}`);
+      gameResult = state.result;
+      currentSide = state.current_side;
+      boardFlipped = false;
+      renderGameInfo(state);
+      renderPlayerCards(state);
+      renderResultPanel(state);
+    } catch (err) { /* 信息拉不到不影响看棋谱 */ }
+
+    document.getElementById("replay-exit-row").style.display = "block";
+    gotoIndex(null);
+    setMessage(`正在复盘对局 ${id}（共 ${positionHistory.length - 1} 步），用 ⏮ ◀ ▶ ⏭ 或方向键浏览`);
+  }
+
+  document.getElementById("btn-replay-exit").addEventListener("click", () => {
     window.location.href = "index.html";
-  }
-
-  document.getElementById("btn-replay-prev").addEventListener("click", () => {
-    if (replayIndex > 0) { replayIndex--; showReplayStep(); }
   });
-  document.getElementById("btn-replay-next").addEventListener("click", () => {
-    if (replayIndex < replaySteps.length - 1) { replayIndex++; showReplayStep(); }
-  });
-  document.getElementById("btn-replay-exit").addEventListener("click", exitReplay);
   document.getElementById("btn-game-review").addEventListener("click", () => {
     window.location.href = `game.html?replay=${gameId}`;
   });
@@ -1117,17 +1298,7 @@
     socket.onerror = () => setMessage("实时连接出现问题，如果对方走棋后棋盘没反应，试试刷新页面。");
   }
 
-  function syncHistory(state) {
-    if (state.move_count === historyEntries.length + 1 && state.last_move) {
-      historyEntries.push(state.last_move);
-    } else if (state.move_count < historyEntries.length) {
-      historyEntries.length = state.move_count;
-    }
-    renderHistory();
-  }
-
   function handleIncomingState(state) {
-    syncHistory(state);
     selected = null;
     legalDestinations = [];
     disarm();
@@ -1209,7 +1380,7 @@
   }
 
   function tickClocks() {
-    if (!clockState.timeControl || gameResult !== "ongoing" || replayMode) return;
+    if (!clockState.timeControl || gameResult !== "ongoing" || replayOnly) return;
     const elapsed = (Date.now() - clockState.syncedAt) / 1000;
     let blackDisplay = clockState.blackTime;
     let whiteDisplay = clockState.whiteTime;
@@ -1326,18 +1497,40 @@
 
   function applyState(state) {
     const previousBoard = prevBoardState;
+    const wasBrowsing = isBrowsingHistory();
 
-    boardState = state.board;
     currentSide = state.current_side;
     gameResult = state.result;
     inCheck = !!state.in_check;
-    lastMoveFrom = state.last_move_from || null;
-    lastMoveTo = state.last_move_to || null;
     currentStateRated = !!state.rated;
     legalMovesMap = state.legal_moves || {};
-    updateOrientations(state.board, lastMoveFrom, lastMoveTo);
     if (state.my_side !== undefined && state.my_side !== null) mySide = state.my_side;
     boardFlipped = mySide === "white" || (!mySide && !!(authUsername && state.white_player === authUsername));
+
+    // 把这次的最新局面并进历史序列：
+    //   move_count 就是"走了几步"，正好对应 positionHistory 的下标
+    const count = state.move_count;
+    if (positionHistory.length === 0) positionHistory = [{}];
+    if (count === positionHistory.length) {
+      // 正常推进了一步
+      positionHistory.push(state.board);
+      moveMeta.push({
+        notation: state.last_move || "",
+        side: currentSide === "black" ? "white" : "black",
+        from_sq: state.last_move_from || null,
+        to_sq: state.last_move_to || null,
+      });
+    } else if (count < positionHistory.length - 1) {
+      // 悔棋：把多出来的历史截掉
+      positionHistory.length = count + 1;
+      moveMeta.length = count + 1;
+      positionHistory[count] = state.board;
+      if (viewIndex !== null && viewIndex > count) viewIndex = null;
+    } else {
+      // 同一步的重复推送（比如自己走棋的HTTP响应和WebSocket广播各来一次）
+      positionHistory[count] = state.board;
+    }
+    historyEntries = moveMeta.slice(1).map((m) => (m ? m.notation : ""));
 
     clockState = {
       blackTime: state.black_time,
@@ -1346,9 +1539,29 @@
       syncedAt: Date.now(),
     };
 
-    // 只有"棋子数正好多走了一步"时才播动画：
-    // 刚进对局、悔棋、复盘跳步这些情况不该有滑动效果
-    const detected = (!replayMode && previousBoard)
+    renderGameInfo(state);
+    renderPlayerCards(state);
+    renderActionButtons();
+    renderOfferBanner(state.pending_offer);
+    renderResultPanel(state);
+    tickClocks();
+
+    if (wasBrowsing) {
+      // 用户正在回看历史，不要把画面强行拽回最新局面——
+      // 只刷新棋谱和"回到当前局面"的提示，让他自己决定什么时候回去
+      renderHistory();
+      renderNavButtons();
+      renderTurnBanner();
+      return;
+    }
+
+    // 跟着最新局面：正常渲染，必要时播放走子动画
+    boardState = state.board;
+    lastMoveFrom = state.last_move_from || null;
+    lastMoveTo = state.last_move_to || null;
+    updateOrientations(state.board, lastMoveFrom, lastMoveTo);
+
+    const detected = (!replayOnly && previousBoard)
       ? detectMove(previousBoard, boardState, lastMoveFrom, lastMoveTo)
       : null;
     prevBoardState = boardState;
@@ -1362,20 +1575,18 @@
       drawBoard();
       renderCaptured();
     }
-
-    renderGameInfo(state);
-    renderPlayerCards(state);
-    renderActionButtons();
-    renderOfferBanner(state.pending_offer);
-    renderResultPanel(state);
-    tickClocks();
-
+    renderHistory();
+    renderNavButtons();
+    renderTurnBanner();
   }
 
   async function newGame() {
     selected = null;
     legalDestinations = [];
     historyEntries = [];
+    positionHistory = [];
+    moveMeta = [null];
+    viewIndex = null;
     renderHistory();
     setMessage("正在创建新对局…");
     const state = await apiPost("/games", {});
@@ -1386,33 +1597,28 @@
     setMessage("新对局已开始，黑方先行。");
   }
 
-  function parseHistoryText(text) {
-    const entries = [];
-    text.split("\n").forEach((line) => {
-      const dotIndex = line.indexOf(".");
-      if (dotIndex === -1) return;
-      const rest = line.slice(dotIndex + 1).trim();
-      if (!rest) return;
-      rest.split(/\s+/).forEach((token) => entries.push(token));
-    });
-    return entries;
-  }
-
   async function loadGame(id) {
     setMessage(`正在加载对局 ${id} …`);
-    const state = await apiGet(`/games/${id}`);
     gameId = id;
     gameIdChip.textContent = "对局: " + gameId;
     selected = null;
     legalDestinations = [];
-    applyState(state);
 
-    historyEntries = [];
+    // 先把整局的历史局面拉下来——有了它，一进对局就能立刻回看任意一步，
+    // 不用等到走了棋才慢慢攒出历史
+    positionHistory = [];
+    moveMeta = [null];
+    viewIndex = null;
     try {
-      const hist = await apiGet(`/games/${id}/history`);
-      historyEntries = parseHistoryText(hist.history);
-    } catch (e) { /* 忽略 */ }
-    renderHistory();
+      await loadHistoryPositions(id);
+    } catch (e) {
+      // 拉不到历史不影响正常下棋，applyState 会从当前局面重新开始攒
+      positionHistory = [];
+      moveMeta = [null];
+    }
+
+    const state = await apiGet(`/games/${id}`);
+    applyState(state);
     setMessage(`已加载对局 ${id}`);
     connectSocket(gameId);
 
@@ -1455,7 +1661,12 @@
   }
 
   canvas.addEventListener("click", (evt) => {
-    if (replayMode || gameResult !== "ongoing" || !gameId) return;
+    if (replayOnly || gameResult !== "ongoing" || !gameId) return;
+    if (isBrowsingHistory()) {
+      // 正在回看历史局面，不能在这里落子——先提示怎么回到当前局面
+      setMessage("你正在回看历史局面，点右侧的 → 或 ⏭ 回到当前局面才能走棋。");
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
