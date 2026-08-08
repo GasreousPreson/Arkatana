@@ -38,7 +38,7 @@ from __future__ import annotations
 import re
 
 from board import Board, parse_coord, coord_to_str, MIN_ROW, MAX_ROW, NUM_COLS
-from pieces import Side, PIECE_CLASSES, Pawn
+from pieces import Side, PIECE_CLASSES
 from rules import get_legal_moves
 
 
@@ -92,31 +92,6 @@ def compute_disambiguation(board: Board, piece, to_sq: tuple[int, int]) -> str |
 
     # 列字母无法区分（有别的同类棋子也在同一列），改用排数字消歧义
     return str(piece.position[1])
-
-
-def compute_pawn_disambiguation(
-    from_sq: tuple[int, int], to_sq: tuple[int, int],
-    is_capture: bool, was_already_promoted: bool,
-) -> str | None:
-    """
-    兵专属的消歧义规则——跟其他棋子共用的 compute_disambiguation() 是两套
-    独立逻辑，不看"场上是否真的存在别的兵也能到同一格"，只看这一步棋本身：
-
-    - 未升变兵：只要是吃子，永远带上出发列字母（不管是否真的存在歧义，
-      跟真实国际象棋 "exd5" 的写法习惯一致）；非吃子的移动不带列字母。
-    - 已升变兵：只要出发列跟到达列不一样（也就是这一步斜走或横移了）就带上
-      出发列字母，一样（直着走）就不带。
-
-    origin_col == dest_col 时省略字母，即使当时场上其实有别的兵也能走到
-    这一格（例如三个兵分别从斜两侧、正前方汇聚同一格）——这种情况下，
-    "没带字母的那个"就代表"正前方直走过来的那个"，这本身就是消歧义的一部分。
-    """
-    origin_col = coord_to_str(*from_sq)[0]
-    dest_col = coord_to_str(*to_sq)[0]
-
-    if was_already_promoted:
-        return origin_col if origin_col != dest_col else None
-    return origin_col if is_capture else None
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +154,8 @@ def parse_move_notation(
     if text.endswith("+"):
         text = text[:-1]
 
-    # 去掉"这个棋子本来就已经升变"的前缀 "+"（在最前面）；记下是否有这个前缀，
-    # 兵的消歧义解析需要用到（见下方特殊处理）
-    was_already_promoted = text.startswith("+")
-    if was_already_promoted:
+    # 去掉"这个棋子本来就已经升变"的前缀 "+"（在最前面）
+    if text.startswith("+"):
         text = text[1:]
 
     # 匹配棋子字母（兵没有字母，remainder 就是整个剩余字符串）
@@ -197,8 +170,7 @@ def parse_move_notation(
 
     remainder = text[len(piece_code):]
 
-    is_capture = remainder.startswith("x")
-    if is_capture:
+    if remainder.startswith("x"):
         remainder = remainder[1:]
 
     match = _DESTINATION_PATTERN.match(remainder)
@@ -223,13 +195,6 @@ def parse_move_notation(
             candidates = {c for c in candidates if coord_to_str(*c)[0] == disambig}
         else:
             candidates = {c for c in candidates if str(c[1]) == disambig}
-    elif piece_cls is Pawn and was_already_promoted:
-        # 兵专属规则：已升变兵省略消歧义字母，意味着"出发列跟到达列相同"
-        # （也就是直着走过来的那个），不能套用其他棋子"没写字母=候选只有一个"
-        # 的假设——这里同一格可能真的有好几个兵能到，但没带字母的必然是
-        # 那个"列不变"的，用这个额外条件筛选。
-        dest_col = coord_to_str(*to_sq)[0]
-        candidates = {c for c in candidates if coord_to_str(*c)[0] == dest_col}
 
     if len(candidates) != 1:
         readable = [coord_to_str(*c) for c in candidates]
@@ -386,10 +351,10 @@ if __name__ == "__main__":
         side=Side.BLACK, piece_type="Pawn",
         from_sq=parse_coord("d7"), to_sq=parse_coord("d8"),
         captured_type="Pawn", promoted=True,
-        was_already_promoted=False, disambiguation="d", is_checkmate=False,
+        was_already_promoted=False, disambiguation=None, is_checkmate=False,
     )
     promo_text = move_notation(promo_record)
-    assert promo_text == "dxd8+", f"未升变兵吃子应带出发列字母: {promo_text}"
+    assert promo_text == "xd8+", f"兵没有字母前缀，升变+吃子应为: {promo_text}"
 
     # 2) 整局记谱格式化
     game_text = format_game([checkmate_capture, disambiguated])
@@ -466,61 +431,6 @@ if __name__ == "__main__":
     lone_hussar = Hussar(Side.BLACK, parse_coord("c2"))
     board7.set(lone_hussar.position, lone_hussar)
     assert compute_disambiguation(board7, lone_hussar, f3) is None
-
-    # 5) 兵专属记谱规则（compute_pawn_disambiguation）——跟其他棋子是两套独立逻辑
-    from game import Game as _Game
-    from board import parse_coord as _pc, coord_to_str as _cts
-    from pieces import Pawn as _Pawn
-
-    def _fresh_board_with_pawns(coords):
-        g = _Game()
-        g.board = type(g.board)()
-        for sq in coords:
-            p = _Pawn(Side.BLACK, _pc(sq))
-            p.promoted = True
-            g.board.set(_pc(sq), p)
-        g.current_side = Side.BLACK
-        return g
-
-    # 5a) 未升变兵：非吃子移动不带列字母
-    g = _Game()
-    r = g.make_move(_pc("e5"), _pc("e6"))
-    assert move_notation(r) == "e6", move_notation(r)
-
-    # 5b) 未升变兵：吃子永远带列字母（未升变兵只能正前方吃，列字母技术上总是
-    #     跟到达列相同，但这是按要求保留的"冗余但一致"写法，不是bug）
-    g = _Game()
-    g.board = type(g.board)()
-    black_pawn = _Pawn(Side.BLACK, _pc("d5"))
-    white_pawn = _Pawn(Side.WHITE, _pc("d6"))
-    g.board.set(_pc("d5"), black_pawn)
-    g.board.set(_pc("d6"), white_pawn)
-    g.current_side = Side.BLACK
-    rec = g.make_move(_pc("d5"), _pc("d6"))
-    text = move_notation(rec)
-    assert text == "dxd6", f"未升变兵吃子应带出发列字母: {text}"
-
-    # 5c) 已升变兵：三个兵分别斜/直/斜汇聚同一格（用户举的第一组例子）
-    for start, expect in [("c9", "+cd10"), ("d9", "+d10"), ("e9", "+ed10")]:
-        gg = _fresh_board_with_pawns(["c9", "d9", "e9"])
-        rec = gg.make_move(_pc(start), _pc("d10"))
-        got = move_notation(rec)
-        assert got == expect, f"{start}->d10 期望{expect}，实际{got}"
-
-    # 5d) 已升变兵：两侧横移 + 中间直走汇聚同一格（用户举的第二组例子）
-    for start, expect in [("c10", "+cd10"), ("e10", "+ed10"), ("d9", "+d10")]:
-        gg = _fresh_board_with_pawns(["c10", "e10", "d9"])
-        rec = gg.make_move(_pc(start), _pc("d10"))
-        got = move_notation(rec)
-        assert got == expect, f"{start}->d10 期望{expect}，实际{got}"
-
-    # 5e) 解析器往返：省略字母的 "+d10" 必须能从三个候选里正确挑出"直走"的那个，
-    #     不能套用其他棋子"没写字母=候选只有一个"的通用假设
-    gg = _fresh_board_with_pawns(["c10", "e10", "d9"])
-    from_sq, to_sq = parse_move_notation("+d10", gg.board, Side.BLACK)
-    assert _cts(*from_sq) == "d9", _cts(*from_sq)
-    from_sq, to_sq = parse_move_notation("+cd10", gg.board, Side.BLACK)
-    assert _cts(*from_sq) == "c10", _cts(*from_sq)
 
     print("notation.py 自检全部通过 ✅")
     print()
