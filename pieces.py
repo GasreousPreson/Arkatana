@@ -283,7 +283,7 @@ _HUSSAR_OFFSETS = [
 
 class Hussar(Piece):
     name = "轻骑士"
-    symbol = "马"
+    symbol = "轻"
     notation = "H"
 
     def pseudo_moves(self, board) -> list[Move]:
@@ -308,7 +308,7 @@ _KNIGHT_OFFSETS = [
 
 class Knight(Piece):
     name = "重骑士"
-    symbol = "骑"
+    symbol = "重"
     notation = "N"
 
     def pseudo_moves(self, board) -> list[Move]:
@@ -325,7 +325,7 @@ class Knight(Piece):
 
 class Rook(Piece):
     name = "攻城塔"
-    symbol = "車"
+    symbol = "塔"
     notation = "R"   # 沿用国际象棋习惯
 
     def pseudo_moves(self, board) -> list[Move]:
@@ -359,7 +359,7 @@ class Phoenix(Piece):
 
 class Swordsman(Piece):
     name = "剑士"
-    symbol = "士"
+    symbol = "剑"
     notation = "S"
 
     def pseudo_moves(self, board) -> list[Move]:
@@ -420,7 +420,7 @@ class Swordsman(Piece):
 
 class Chariot(Piece):
     name = "战车"
-    symbol = "輣"
+    symbol = "战"
     notation = "C"
 
     def pseudo_moves(self, board) -> list[Move]:
@@ -448,7 +448,7 @@ class Chariot(Piece):
 
 class Throne(Piece):
     name = "王城"
-    symbol = "楚"
+    symbol = "城"
     notation = "TH"
 
     def pseudo_moves(self, board) -> list[Move]:

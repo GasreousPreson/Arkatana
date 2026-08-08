@@ -51,6 +51,7 @@ from google.auth.transport import requests as google_requests
 from board import parse_coord, coord_to_str
 from pieces import Side, Throne
 from game import Game, IllegalMoveError, GameOverError
+from layout import setup_initial_board
 from notation import format_game, move_notation, position_string_to_board
 from rules import is_in_check, GameResult
 from clock import TimeControl
@@ -223,6 +224,14 @@ def game_state(game_id: str, game: Game) -> dict:
 
     last_move_record = game.move_log[-1] if game.move_log else None
 
+    # 当前行棋方每颗棋子各自能走到哪些格子，一次性全给前端。
+    # 这样点选棋子时可以本地查表立刻高亮，不用每次点击都往返一次服务器——
+    # 对跨国访问来说，省掉的这次往返就是"点一下卡一下"的主要来源。
+    # 代价只是响应体稍大一点，比多次往返划算得多。
+    legal_map: dict[str, list[str]] = {}
+    for move in game.legal_moves():
+        legal_map.setdefault(coord_to_str(*move.from_sq), []).append(coord_to_str(*move.to_sq))
+
     return {
         "game_id": game_id,
         "current_side": game.current_side.value,
@@ -235,6 +244,8 @@ def game_state(game_id: str, game: Game) -> dict:
         "clock_started": game.clock.active_side is not None,
         "in_check": is_in_check(game.board, game.current_side) if game.result.value == "ongoing" else False,
         "pending_offer": GAME_OFFERS.get(game_id),
+        "end_reason": game.end_reason.value if game.end_reason else None,
+        "legal_moves": legal_map,
         "last_move_from": coord_to_str(*last_move_record.from_sq) if last_move_record else None,
         "last_move_to": coord_to_str(*last_move_record.to_sq) if last_move_record else None,
         **time_info,
@@ -513,6 +524,13 @@ async def create_game(
     自己的棋钟却在空转。
     """
     creator = get_current_user(x_auth_token)
+    if x_auth_token and creator is None:
+        # 带了令牌但服务器查不到——通常是服务器重启过、内存里的登录状态清空了
+        # （令牌目前是纯内存存储，这是已知的架构限制）。
+        # 不能悄悄当成匿名处理，那会让"明明登录了却建出匿名房间"这种confusing的情况
+        # 悄无声息地发生；应该让调用方知道，去重新登录。
+        raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录后再创建对局")
+
     preference = (body.side_preference if body else "random").strip().lower()
     rated = bool(body.rated) if body else False
     minutes_per_side = body.minutes_per_side if body else None
@@ -934,6 +952,32 @@ def get_lobby(limit: int = 20):
     return {"rooms": db.list_open_rooms(limit=limit)}
 
 
+@app.get("/database/search")
+def search_database(
+    player: str | None = None,
+    opponent: str | None = None,
+    rated: bool | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """
+    搜索全站对局库（"Database" 页面用这个）。公开接口，不需要登录——
+    浏览已经结束的对局本来就是开放给所有人的功能。
+    参数含义详见 db.search_games 的说明；日期格式必须是 "YYYY-MM-DD"，
+    格式不对会返回 400。
+    """
+    try:
+        return db.search_games(
+            player=player, opponent=opponent, rated=rated,
+            date_from=date_from, date_to=date_to,
+            limit=min(limit, 100), offset=max(offset, 0),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"日期格式不对，请用 YYYY-MM-DD: {e}")
+
+
 @app.get("/games")
 def list_games(limit: int = 20):
     """列出最近更新过的对局摘要（内部/管理用途，不是网页首页"Game History"用的那个）"""
@@ -965,8 +1009,13 @@ def get_replay(game_id: str):
                 "move_number": step["move_number"],
                 "side": step["side"],
                 "notation": step["notation"],
+                "from_sq": step.get("from_sq"),
+                "to_sq": step.get("to_sq"),
                 "board": board_to_json(board),
             })
+        # 第0步（还没走任何棋）的初始局面也要给前端——
+        # 浏览历史时"回到最开始"需要它，光有每步之后的局面是不够的
+        initial_board = board_to_json(setup_initial_board())
     except Exception as e:
         # 常见原因：这局对局是用旧版记谱格式存的，现在的解析器读不懂了
         # （记谱格式在开发过程中调整过，早期存的数据可能跟当前版本不兼容）
@@ -974,7 +1023,7 @@ def get_replay(game_id: str):
             status_code=422,
             detail=f"这局对局的棋谱回放失败，可能是用旧格式存储的历史数据: {type(e).__name__}: {e}",
         )
-    return {"game_id": game_id, "steps": result}
+    return {"game_id": game_id, "initial_board": initial_board, "steps": result}
 
 
 # ---------------------------------------------------------------------------
