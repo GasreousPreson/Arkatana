@@ -8,8 +8,8 @@
   :root {
     --ink: #17161a;
     --ink-raised: #232228;
-    --parchment-light: #e3e1d8;   /* 浅格：中性偏暖的浅灰 */
-    --parchment-dark: #bbb5a6;    /* 深格：中性偏暖的灰褐 */
+    --parchment-light: #e6e4de;   /* 浅格：几乎中性的浅灰 */
+    --parchment-dark: #c2bdb2;    /* 深格：几乎中性的灰 */
     --cinnabar: #a6362b;
     --jade: #3f6656;
     --gold: #b8944b;
@@ -258,7 +258,7 @@
     align-items: center;
     gap: 3px;
     min-height: 24px;
-    max-width: 682px;
+    max-width: 726px;
     flex-wrap: wrap;
   }
   .piece-chip {
@@ -403,9 +403,14 @@
     display: flex; align-items: center; gap: 6px;
     font-size: 13px; padding: 3px 0;
   }
-  .side-flag { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-  .side-flag.black { background: var(--cinnabar); }
-  .side-flag.white { background: var(--jade); }
+  .side-icon { flex-shrink: 0; vertical-align: -2px; }
+  .side-icon-black { color: var(--parchment-light); }
+  .side-icon-white { color: var(--parchment-light); }
+
+  /* 对局结果配色：黑胜金色 / 白胜白色 / 和棋青铜色 */
+  .result-text.outcome-black { color: #d9a441; }
+  .result-text.outcome-white { color: #f0ece1; }
+  .result-text.outcome-draw  { color: #9c8f6b; }
 
   .chat-card { display: flex; flex-direction: column; height: 340px; }
   .chat-card h2 { flex-shrink: 0; }
@@ -528,7 +533,7 @@
   <div class="center-col">
     <div class="captured-row" id="captured-top"></div>
     <div id="board-wrap">
-      <canvas id="board" width="682" height="744"></canvas>
+      <canvas id="board" width="726" height="792"></canvas>
     </div>
     <div class="captured-row" id="captured-bottom"></div>
 
@@ -544,8 +549,8 @@
     <div class="card game-info-card">
       <h2>对局信息</h2>
       <div class="tc-line" id="tc-line">- </div>
-      <div class="player-line"><span class="side-flag black"></span><span id="info-black-name">-</span></div>
-      <div class="player-line"><span class="side-flag white"></span><span id="info-white-name">-</span></div>
+      <div class="player-line"><span class="side-icon-black" id="info-black-icon"></span><span id="info-black-name">-</span></div>
+      <div class="player-line"><span class="side-icon-white" id="info-white-icon"></span><span id="info-white-name">-</span></div>
     </div>
 
     <div class="card chat-card">
@@ -562,6 +567,7 @@
 </div>
 
 <script src="pieces.js"></script>
+<script src="shared.js"></script>
 <script>
 (() => {
   "use strict";
@@ -572,7 +578,7 @@
   const COLS = "abcdefghjkl";  // 跳过 i，避免与 j 混淆
   const MIN_ROW = 1;
   const MAX_ROW = 12;
-  const CELL = 62;   // 格子略微加大
+  const CELL = 66;   // 格子再放大一点
   const MARGIN = 0;  // 无外框，坐标直接画进棋盘格内
 
   const canvas = document.getElementById("board");
@@ -584,7 +590,7 @@
     parchDark: "#cbb98d",
     cinnabar: "#a6362b",
     jade: "#3f6656",
-    gold: "#b8944b",
+    gold: "#e0a92a",   // 走棋提示：高饱和金色
     lastMove: "rgba(214, 168, 60, 0.45)",   // 走子标注：金橙色
     checkGlow: "rgba(196, 45, 45, 0.55)",
   };
@@ -630,6 +636,7 @@
   let moveMeta = [];
   let viewIndex = null;
   let replayOnly = false;   // true = 纯复盘页面（没有实时对局），进来就是只读
+  let lastEndReason = null; // 这局是怎么结束的（resigned/checkmate/timedout/...）
 
   let authToken = localStorage.getItem("arkatana_token") || null;
   let authUsername = localStorage.getItem("arkatana_username") || null;
@@ -658,6 +665,7 @@
     moveOther: new Audio("sounds/move-2.mp3"),
     capture:   new Audio("sounds/capture_2.mp3"),
     check:     new Audio("sounds/check.mp3"),
+    checkmate: new Audio("sounds/checkmate.mp3"),
   };
   Object.values(SOUNDS).forEach((a) => { a.preload = "auto"; a.volume = 0.85; });
 
@@ -1139,15 +1147,56 @@
     return viewIndex !== null && viewIndex < positionHistory.length - 1;
   }
 
-  /** 跳到第 index 步；传 null 表示回到最新局面并恢复自动跟随 */
+  /**
+   * 跳到第 index 步；传 null 表示回到最新局面并恢复自动跟随。
+   * 如果是"往前走一步"（不是跳跃、也不是后退），就播放动画和音效，
+   * 让复盘/回看跟真的在下棋一样有反馈。
+   */
   function gotoIndex(index) {
     const last = Math.max(0, positionHistory.length - 1);
-    if (index === null || index >= last) {
-      viewIndex = null;
+    const before = effectiveIndex();
+    const target = (index === null || index >= last) ? last : Math.max(0, index);
+    const steppingForward = target === before + 1;
+
+    viewIndex = (index === null || index >= last) ? null : Math.max(0, index);
+
+    if (steppingForward && target > 0) {
+      playHistoryStep(target);
     } else {
-      viewIndex = Math.max(0, index);
+      renderCurrentView();
     }
-    renderCurrentView();
+  }
+
+  /** 把第 stepIndex 步"演"出来：滑动动画 + 对应音效 */
+  function playHistoryStep(stepIndex) {
+    const meta = moveMeta[stepIndex];
+    const prevBoard = positionHistory[stepIndex - 1];
+    const nextBoard = positionHistory[stepIndex];
+    if (!meta || !prevBoard || !nextBoard || !meta.from_sq || !meta.to_sq) {
+      renderCurrentView();
+      return;
+    }
+
+    // 先把静态部分（棋谱高亮、导航按钮等）刷新到位
+    boardState = nextBoard;
+    lastMoveFrom = meta.from_sq;
+    lastMoveTo = meta.to_sq;
+    inCheck = false;
+    selected = null;
+    legalDestinations = [];
+    updateOrientations(nextBoard, meta.from_sq, meta.to_sq);
+    renderHistory();
+    renderNavButtons();
+    renderTurnBanner();
+
+    const detected = detectMove(prevBoard, nextBoard, meta.from_sq, meta.to_sq);
+    prevBoardState = nextBoard;
+    if (!detected) { renderCurrentView(); return; }
+
+    // 最后一步且这局是被绝杀结束的，就用绝杀音效收尾
+    const isLastStep = stepIndex === positionHistory.length - 1;
+    const isMate = isLastStep && gameResult !== "ongoing" && lastEndReason === "checkmate";
+    startMoveAnimation(detected, meta.side, false, isMate);
   }
 
   /** 按当前 viewIndex 把棋盘、吃子栏、棋谱高亮、导航按钮全部刷新一遍 */
@@ -1265,6 +1314,7 @@
       const state = await apiGet(`/games/${id}`);
       gameResult = state.result;
       currentSide = state.current_side;
+      lastEndReason = state.end_reason || null;
       boardFlipped = false;
       renderGameInfo(state);
       renderPlayerCards(state);
@@ -1442,6 +1492,11 @@
     document.getElementById("tc-line").textContent = tcLabel;
     document.getElementById("info-black-name").textContent = state.black_player || "匿名";
     document.getElementById("info-white-name").textContent = state.white_player || "匿名";
+    const S = window.ArkatanaShared;
+    if (S) {
+      document.getElementById("info-black-icon").innerHTML = S.sideIcon("black", 16);
+      document.getElementById("info-white-icon").innerHTML = S.sideIcon("white", 16);
+    }
   }
 
   function renderResultPanel(state) {
@@ -1449,8 +1504,10 @@
       resultPanelEl.style.display = "none";
       return;
     }
-    const labels = { black_wins: "黑方获胜", white_wins: "白方获胜", draw: "双方和棋" };
-    resultTextEl.textContent = labels[state.result] || state.result;
+    const S = window.ArkatanaShared;
+    const { text, outcome } = S ? S.resultText(state) : { text: state.result, outcome: "none" };
+    resultTextEl.textContent = text;
+    resultTextEl.className = "result-text outcome-" + outcome;
     resultPanelEl.style.display = "block";
   }
 
@@ -1465,14 +1522,16 @@
     return { fromSq, toSq, movingInfo, capturedInfo };
   }
 
-  function startMoveAnimation(detected, movedSide, nowInCheck) {
+  function startMoveAnimation(detected, movedSide, nowInCheck, isCheckmate) {
     anim = { ...detected, startedAt: performance.now() };
     if (animRaf) cancelAnimationFrame(animRaf);
 
     // 音效在动画"开始"时就播，跟视觉同步；放在动画结束才播会明显滞后，
     // 而且之前己方走棋常常听不到声音，就是因为等到动画结束时状态已被覆盖。
-    if (nowInCheck) {
-      playSound("check");            // 将军/将杀优先提示
+    if (isCheckmate) {
+      playSound("checkmate");        // 绝杀：只播这一个，不叠加走子/吃子音效
+    } else if (nowInCheck) {
+      playSound("check");            // 普通将军
     } else if (detected.capturedInfo) {
       playSound("capture");
     } else {
@@ -1503,6 +1562,7 @@
     gameResult = state.result;
     inCheck = !!state.in_check;
     currentStateRated = !!state.rated;
+    lastEndReason = state.end_reason || null;
     legalMovesMap = state.legal_moves || {};
     if (state.my_side !== undefined && state.my_side !== null) mySide = state.my_side;
     boardFlipped = mySide === "white" || (!mySide && !!(authUsername && state.white_player === authUsername));
@@ -1569,7 +1629,8 @@
     if (detected) {
       // 走这步的是刚才那一方（现在轮到对面了），据此判断该播己方还是对方音效
       const movedSide = currentSide === "black" ? "white" : "black";
-      startMoveAnimation(detected, movedSide, inCheck);
+      const isMate = state.result !== "ongoing" && state.end_reason === "checkmate";
+      startMoveAnimation(detected, movedSide, inCheck, isMate);
     } else {
       anim = null;
       drawBoard();

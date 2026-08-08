@@ -244,6 +244,7 @@ def game_state(game_id: str, game: Game) -> dict:
         "clock_started": game.clock.active_side is not None,
         "in_check": is_in_check(game.board, game.current_side) if game.result.value == "ongoing" else False,
         "pending_offer": GAME_OFFERS.get(game_id),
+        "end_reason": game.end_reason.value if game.end_reason else None,
         "legal_moves": legal_map,
         "last_move_from": coord_to_str(*last_move_record.from_sq) if last_move_record else None,
         "last_move_to": coord_to_str(*last_move_record.to_sq) if last_move_record else None,

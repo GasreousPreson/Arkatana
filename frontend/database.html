@@ -164,16 +164,12 @@
     font-size: 13px;
   }
 
-  .side-flag {
-    width: 8px; height: 8px; border-radius: 50%;
-    display: inline-block; margin-right: 5px;
-  }
-  .side-flag.black { background: var(--cinnabar); }
-  .side-flag.white { background: var(--jade); }
+  .side-icon { vertical-align: -2px; margin-right: 5px; color: var(--parchment-light); }
 
-  .result-text.black-wins { color: var(--cinnabar); }
-  .result-text.white-wins { color: var(--jade); }
-  .result-text.draw { color: var(--gold); }
+  /* 结果配色：黑胜=金 / 白胜=白 / 和棋=不生锈的青铜 */
+  .result-text.outcome-black { color: #d9a441; }
+  .result-text.outcome-white { color: #f0ece1; }
+  .result-text.outcome-draw  { color: #9c8f6b; }
 
   .pagination {
     display: flex;
@@ -186,6 +182,7 @@
   .pagination button:disabled { opacity: 0.35; cursor: not-allowed; }
   .pagination button:disabled:hover { background: var(--parchment-light); }
 </style>
+<script src="shared.js"></script>
 </head>
 <body>
 
@@ -303,12 +300,10 @@
   }
 
   function resultLabel(g) {
-    // 目前只有"谁赢/是否和棋"这一层信息，没有单独记录"认输/超时/将杀"这种
-    // 具体原因（那需要给对局记录额外加一个字段，是后续可以补的功能）
-    if (g.result === "black_wins") return { text: "黑方获胜", cls: "black-wins" };
-    if (g.result === "white_wins") return { text: "白方获胜", cls: "white-wins" };
-    if (g.result === "draw") return { text: "双方和棋", cls: "draw" };
-    return { text: g.result, cls: "" };
+    const S = window.ArkatanaShared;
+    if (!S) return { text: g.result, cls: "" };
+    const { text, outcome } = S.resultText(g);
+    return { text, cls: "outcome-" + outcome };
   }
 
   function formatDate(iso) {
@@ -373,6 +368,7 @@
       }
 
       body.innerHTML = "";
+      const S = window.ArkatanaShared;
       games.forEach((g) => {
         const { text: resultText, cls: resultCls } = resultLabel(g);
         const timeText = g.time_control_minutes != null
@@ -384,8 +380,8 @@
         tr.className = "game-row";
         tr.innerHTML = `
           <td>${formatDate(g.updated_at)}</td>
-          <td><span class="side-flag black"></span>${g.black_player || "匿名"}</td>
-          <td><span class="side-flag white"></span>${g.white_player || "匿名"}</td>
+          <td>${S ? S.sideIcon("black", 15) : ""}${g.black_player || "匿名"}</td>
+          <td>${S ? S.sideIcon("white", 15) : ""}${g.white_player || "匿名"}</td>
           <td>${timeText}</td>
           <td>${modeText}</td>
           <td>${g.move_count}</td>

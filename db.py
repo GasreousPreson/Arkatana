@@ -156,6 +156,10 @@ class GameRecord(Base):
     # "匿名对局其实已经凑齐两人了，该从大厅消失了"。
     clock_started = Column(Boolean, default=False, nullable=False)
 
+    # 对局是怎么结束的：resigned/checkmate/stalemate/timedout/aborted/
+    # disconnected/agreement，进行中为空
+    end_reason = Column(String, nullable=True)
+
     # 是否是排位对局；rating_applied 防止评分结算被重复触发
     rated = Column(Boolean, default=False, nullable=False)
     rating_applied = Column(Boolean, default=False, nullable=False)
@@ -272,6 +276,7 @@ def save_game(
     black_time = game.clock.time_left("black")
     white_time = game.clock.time_left("white")
     clock_started = (not game.clock.is_unlimited) and (game.clock.active_side is not None)
+    end_reason = game.end_reason.value if getattr(game, "end_reason", None) else None
 
     with factory() as session:
         record = session.execute(
@@ -294,6 +299,7 @@ def save_game(
                 black_time_remaining=black_time,
                 white_time_remaining=white_time,
                 clock_started=clock_started,
+                end_reason=end_reason,
             )
             session.add(record)
         else:
@@ -308,6 +314,7 @@ def save_game(
             record.black_time_remaining = black_time
             record.white_time_remaining = white_time
             record.clock_started = clock_started
+            record.end_reason = end_reason
             if black_player is not None:
                 record.black_player = black_player
             if white_player is not None:
@@ -469,6 +476,7 @@ def _game_summary(r: "GameRecord") -> dict:
         "black_player": r.black_player,
         "white_player": r.white_player,
         "rated": r.rated,
+        "end_reason": r.end_reason,
         "time_control_minutes": r.time_control_minutes,
         "time_control_increment": r.time_control_increment,
         "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -496,7 +504,11 @@ def list_user_games(username: str, limit: int = 20, session_factory=None) -> lis
     with factory() as session:
         records = session.execute(
             select(GameRecord)
-            .where(or_(GameRecord.black_player == username, GameRecord.white_player == username))
+            .where(
+                or_(GameRecord.black_player == username, GameRecord.white_player == username),
+                # 中途夭折的对局（一方还没走棋就离开）不计入个人对局历史
+                or_(GameRecord.end_reason.is_(None), GameRecord.end_reason != "aborted"),
+            )
             .order_by(GameRecord.updated_at.desc())
             .limit(limit)
         ).scalars().all()
@@ -534,7 +546,11 @@ def search_games(
     """
     factory = session_factory or SessionLocal
     with factory() as session:
-        conditions = [GameRecord.result != "ongoing"]
+        conditions = [
+            GameRecord.result != "ongoing",
+            # 中途夭折的对局不收录进对局库
+            or_(GameRecord.end_reason.is_(None), GameRecord.end_reason != "aborted"),
+        ]
 
         if player and opponent:
             # 两人分别落在黑白两方，不限定谁执黑谁执白

@@ -218,15 +218,7 @@
     font-weight: 700;
   }
   table.lobby-table tr.room-row-mine:hover { background: rgba(184, 148, 75, 0.28); }
-  .side-flag {
-    display: inline-block;
-    width: 10px; height: 10px;
-    border-radius: 50%;
-    margin-right: 6px;
-  }
-  .side-flag.black { background: var(--cinnabar); }
-  .side-flag.white { background: var(--jade); }
-  .side-flag.neutral { background: var(--gold); opacity: 0.5; }
+  .side-icon { vertical-align: -2px; margin-right: 6px; color: var(--parchment-light); }
   .empty-note { opacity: 0.6; font-size: 13px; padding: 8px 0; }
 
   /* Game History */
@@ -247,8 +239,10 @@
   .history-entry .players { font-size: 14px; }
   .history-entry .players .vs { opacity: 0.6; margin: 0 6px; }
   .history-entry .result-line { margin-top: 4px; font-size: 12px; }
-  .history-entry .result-line.black-wins { color: var(--cinnabar); }
-  .history-entry .result-line.white-wins { color: var(--jade); }
+  /* 从"我"的角度看：赢=绿 / 输=红 / 和=黄 */
+  .history-entry .result-line.win  { color: #5fae5f; }
+  .history-entry .result-line.loss { color: #c0503f; }
+  .history-entry .result-line.draw { color: #d4b348; }
 
   /* 右侧操作按钮 */
   .action-btn {
@@ -415,6 +409,7 @@
   }
 </style>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="shared.js"></script>
 </head>
 <body>
 
@@ -802,14 +797,16 @@
 
         // 旗标颜色代表"房主/已经在里面的那一方"，不是空位；
         // 纯匿名房间（open_side === "either"）用中性颜色，因为还没有人真正落座
-        let flagClass = "neutral";
-        if (room.black_player) flagClass = "black";
-        else if (room.white_player) flagClass = "white";
+        let iconSide = "random";
+        if (room.black_player) iconSide = "black";
+        else if (room.white_player) iconSide = "white";
+        const S = window.ArkatanaShared;
+        const iconHtml = S ? S.sideIcon(iconSide, 16) : "";
 
         const tr = document.createElement("tr");
         tr.className = "room-row" + (isMine ? " room-row-mine" : "");
         tr.innerHTML = `
-          <td><span class="side-flag ${flagClass}"></span>${isMine ? "我的房间（等待对手中，点击取消）" : owner}</td>
+          <td>${iconHtml}${isMine ? "我的房间（等待对手中，点击取消）" : owner}</td>
           <td>${ratingText}</td>
           <td>${timeText}</td>
           <td>${modeText}</td>
@@ -860,9 +857,13 @@
 
   function resultLabel(g) {
     if (g.result === "ongoing") return { text: "进行中", cls: "" };
-    if (g.result === "black_wins") return { text: "Black is victorious", cls: "black-wins" };
-    if (g.result === "white_wins") return { text: "White is victorious", cls: "white-wins" };
-    return { text: g.result, cls: "" };
+    const S = window.ArkatanaShared;
+    if (!S) return { text: g.result, cls: "" };
+    const { text } = S.resultText(g);
+    // 颜色按"这局对我来说是赢是输"来定，不是按黑白
+    const outcome = S.outcomeForUser(g, authUsername);
+    const cls = outcome === "win" ? "win" : outcome === "loss" ? "loss" : outcome === "draw" ? "draw" : "";
+    return { text, cls };
   }
 
   async function refreshHistory() {
@@ -892,7 +893,7 @@
         div.innerHTML = `
           <div class="top-row"><span>${timeText} · ${modeText}</span><span>${date}</span></div>
           <div class="players">${g.black_player || "匿名"}<span class="vs">vs</span>${g.white_player || "匿名"}</div>
-          <div class="result-line ${resultCls}">${resultText} · ${g.move_count}步</div>
+          <div class="result-line ${resultCls}">${resultText}</div>
         `;
         div.addEventListener("click", () => {
           window.location.href = `game.html?replay=${g.game_id}`;
