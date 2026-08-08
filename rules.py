@@ -191,17 +191,6 @@ class GameResult(Enum):
     DRAW = "draw"          # 双方同意和棋（规则本身不产生和局，只能由协商达成）
 
 
-class EndReason(Enum):
-    """对局是怎么结束的——决定了结果文案怎么写，也用于统计。"""
-    RESIGNED = "resigned"           # 认输
-    CHECKMATE = "checkmate"         # 杀城
-    STALEMATE = "stalemate"         # 困毙：一方只剩王城，无子可动
-    TIMEDOUT = "timedout"           # 超时
-    ABORTED = "aborted"             # 一方还没走棋就离开了（这类对局不计入历史/对局库）
-    DISCONNECTED = "disconnected"   # 掉线判负
-    AGREEMENT = "agreement"         # 双方同意和棋
-
-
 def _winner_result(losing_side: Side) -> GameResult:
     return GameResult.WHITE_WINS if losing_side == Side.BLACK else GameResult.BLACK_WINS
 

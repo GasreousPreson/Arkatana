@@ -1,424 +1,116 @@
-<!doctype html>
-<html lang="zh-CN">
+<!DOCTYPE html>
+<html lang="zh">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Database · 古戰棋 Arkatana</title>
-<style>
-  :root {
-    --ink: #1b1b1e;
-    --ink-raised: #232327;
-    --parchment-light: #ede3c8;
-    --parchment-dark: #cbb98d;
-    --cinnabar: #a6362b;
-    --jade: #3f6656;
-    --gold: #b8944b;
-  }
 
-  * { box-sizing: border-box; }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-  body {
-    margin: 0;
-    min-height: 100vh;
-    background: var(--ink);
-    color: var(--parchment-light);
-    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
-  }
+<title>Numera 对局库</title>
 
-  a { color: inherit; }
+<link rel="stylesheet" href="/game.css?v=10">
+<link rel="stylesheet" href="/review.css?v=10">
 
-  button, input, select {
-    font-family: inherit;
-  }
-  button {
-    cursor: pointer;
-    border: 1px solid var(--gold);
-    background: var(--parchment-light);
-    color: var(--ink);
-    border-radius: 3px;
-    padding: 8px 16px;
-  }
-  button:hover { background: var(--gold); }
-  button.ghost { background: transparent; color: var(--parchment-light); }
-  button.ghost:hover { background: rgba(184, 148, 75, 0.15); }
-
-  input[type="text"], input[type="date"], select {
-    background: var(--ink-raised);
-    border: 1px solid rgba(184, 148, 75, 0.4);
-    color: var(--parchment-light);
-    border-radius: 3px;
-    padding: 7px 9px;
-    font-size: 13px;
-  }
-  input::placeholder { color: rgba(237, 227, 200, 0.4); }
-
-  /* ---------------------------------------------------------------- */
-  /* 整体外壳：跟首页共用同一套（左侧导航 + 顶栏 + 内容区）              */
-  /* ---------------------------------------------------------------- */
-  .app-shell {
-    display: grid;
-    grid-template-columns: 130px 1fr;
-    grid-template-rows: 56px 1fr;
-    min-height: 100vh;
-  }
-  .sidebar {
-    grid-column: 1;
-    grid-row: 1 / 3;
-    background: var(--ink-raised);
-    border-right: 1px solid rgba(184, 148, 75, 0.25);
-    display: flex;
-    flex-direction: column;
-    padding: 16px 0;
-  }
-  .sidebar .brand {
-    padding: 0 16px 16px;
-    font-family: "SimSun", "Songti SC", Georgia, serif;
-    font-size: 15px;
-    letter-spacing: 0.08em;
-    border-bottom: 1px solid rgba(184, 148, 75, 0.2);
-    margin-bottom: 10px;
-  }
-  .nav-list { list-style: none; margin: 0; padding: 0; flex: 1; }
-  .nav-list li a {
-    display: block;
-    padding: 9px 16px;
-    text-decoration: none;
-    font-size: 14px;
-    color: var(--parchment-light);
-    opacity: 0.85;
-    border-left: 3px solid transparent;
-  }
-  .nav-list li a:hover { background: rgba(184, 148, 75, 0.1); opacity: 1; }
-  .nav-list li a.active { border-left-color: var(--gold); color: var(--gold); opacity: 1; }
-
-  .topbar {
-    grid-column: 2;
-    grid-row: 1;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 24px;
-    border-bottom: 1px solid rgba(184, 148, 75, 0.2);
-  }
-  .topbar .site-title {
-    font-family: "SimSun", "Songti SC", Georgia, serif;
-    font-size: 17px;
-    letter-spacing: 0.1em;
-  }
-  .topbar .site-title .en { color: var(--gold); font-size: 13px; margin-left: 6px; }
-
-  .content {
-    grid-column: 2;
-    grid-row: 2;
-    padding: 24px 28px;
-    overflow-y: auto;
-  }
-
-  /* ---------------------------------------------------------------- */
-  /* Database 页面主体                                                 */
-  /* ---------------------------------------------------------------- */
-  h1 {
-    font-size: 20px;
-    margin: 0 0 18px;
-    color: var(--parchment-light);
-  }
-
-  .search-panel {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: flex-end;
-    padding: 16px;
-    border: 1px solid rgba(184, 148, 75, 0.3);
-    border-radius: 4px;
-    background: rgba(184, 148, 75, 0.04);
-    margin-bottom: 18px;
-  }
-  .search-field { display: flex; flex-direction: column; gap: 4px; }
-  .search-field label { font-size: 12px; color: var(--gold); opacity: 0.9; }
-  .search-field input, .search-field select { min-width: 140px; }
-
-  .result-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-  .result-table th {
-    text-align: left;
-    padding: 8px 10px;
-    color: var(--gold);
-    font-size: 12px;
-    letter-spacing: 0.04em;
-    border-bottom: 1px solid rgba(184, 148, 75, 0.3);
-  }
-  .result-table td {
-    padding: 9px 10px;
-    border-bottom: 1px solid rgba(184, 148, 75, 0.12);
-  }
-  .result-table tr.game-row { cursor: pointer; }
-  .result-table tr.game-row:hover { background: rgba(184, 148, 75, 0.08); }
-  .result-table .empty-note, .result-table .loading-note {
-    text-align: center;
-    padding: 24px;
-    opacity: 0.6;
-    font-size: 13px;
-  }
-
-  .side-icon { vertical-align: -2px; margin-right: 5px; color: var(--parchment-light); }
-
-  /* 结果配色：黑胜=金 / 白胜=白 / 和棋=不生锈的青铜 */
-  .result-text.outcome-black { color: #d9a441; }
-  .result-text.outcome-white { color: #f0ece1; }
-  .result-text.outcome-draw  { color: #9c8f6b; }
-
-  .pagination {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 14px;
-    margin-top: 16px;
-    font-size: 13px;
-  }
-  .pagination button:disabled { opacity: 0.35; cursor: not-allowed; }
-  .pagination button:disabled:hover { background: var(--parchment-light); }
-</style>
-<script src="shared.js"></script>
 </head>
+
 <body>
 
-<div class="app-shell">
-  <nav class="sidebar">
-    <div class="brand">古戰棋<br>Arkatana</div>
-    <ul class="nav-list">
-      <li><a href="index.html" data-name="play">play</a></li>
-      <li><a href="#" data-name="studies">studies</a></li>
-      <li><a href="#" data-name="openings">openings</a></li>
-      <li><a href="database.html" class="active" data-name="database">database</a></li>
-      <li><a href="#" data-name="import">import game</a></li>
-      <li><a href="#" data-name="community">community</a></li>
-      <li><a href="#" data-name="friends">friends</a></li>
-    </ul>
-    <div class="sidebar-bottom" style="padding:10px 16px 0; border-top:1px solid rgba(184,148,75,0.2);">
-      <div style="font-size:13px; opacity:0.8; padding:6px 0;" id="sidebar-account">👤 未登录</div>
+<div id="shell">
+
+<nav id="sidebar">
+
+    <a class="nav-item" href="/">play</a>
+    <a class="nav-item" href="/">studys</a>
+    <a class="nav-item" href="/">openings</a>
+    <a class="nav-item" href="/database">database</a>
+    <a class="nav-item" href="/import">import game</a>
+    <a class="nav-item" href="/">community</a>
+    <a class="nav-item" href="/">friends</a>
+
+    <div id="sidebar-foot">
+        <a id="account" href="/">
+            <span id="avatar">?</span>
+            <span id="account-name">Anonymous</span>
+        </a>
     </div>
-  </nav>
 
-  <header class="topbar">
-    <div class="site-title">古 戰 棋 <span class="en">ARKATANA</span></div>
-  </header>
+</nav>
 
-  <main class="content">
+<div id="page">
+
     <h1>Database</h1>
 
-    <div class="search-panel">
-      <div class="search-field">
-        <label>棋手</label>
-        <input type="text" id="f-player" placeholder="用户名">
-      </div>
-      <div class="search-field">
-        <label>对手</label>
-        <input type="text" id="f-opponent" placeholder="用户名">
-      </div>
-      <div class="search-field">
-        <label>模式</label>
-        <select id="f-mode">
-          <option value="">全部</option>
-          <option value="rated">rated</option>
-          <option value="casual">casual</option>
-        </select>
-      </div>
-      <div class="search-field">
-        <label>起始日期</label>
-        <input type="date" id="f-date-from">
-      </div>
-      <div class="search-field">
-        <label>结束日期</label>
-        <input type="date" id="f-date-to">
-      </div>
-      <button id="btn-search">搜索</button>
-      <button class="ghost" id="btn-reset">重置</button>
+    <div id="filters">
+
+        <label class="filter">
+            <span>棋手</span>
+            <input id="f-player" type="text" placeholder="用户名">
+        </label>
+
+        <label class="filter">
+            <span>对手</span>
+            <input id="f-opponent" type="text" placeholder="用户名">
+        </label>
+
+        <label class="filter">
+            <span>模式</span>
+            <select id="f-mode">
+                <option value="">全部</option>
+                <option value="casual">casual</option>
+                <option value="rated">rated</option>
+            </select>
+        </label>
+
+        <label class="filter">
+            <span>起始日期</span>
+            <input id="f-from" type="date">
+        </label>
+
+        <label class="filter">
+            <span>结束日期</span>
+            <input id="f-to" type="date">
+        </label>
+
+        <button class="btn" id="f-search">搜索</button>
+
+        <button class="btn" id="f-reset">重置</button>
+
     </div>
 
-    <table class="result-table">
-      <thead>
-        <tr>
-          <th>日期</th>
-          <th>黑方</th>
-          <th>白方</th>
-          <th>时间</th>
-          <th>模式</th>
-          <th>手数</th>
-          <th>结果</th>
-        </tr>
-      </thead>
-      <tbody id="result-body">
-        <tr><td colspan="7" class="loading-note">加载中…</td></tr>
-      </tbody>
+    <table class="games">
+
+        <thead>
+            <tr>
+                <th>日期</th>
+                <th>红方</th>
+                <th>黑方</th>
+                <th>时间</th>
+                <th>模式</th>
+                <th>手数</th>
+                <th>结果</th>
+            </tr>
+        </thead>
+
+        <tbody id="rows"></tbody>
+
     </table>
 
-    <div class="pagination" id="pagination"></div>
-  </main>
+    <div id="empty" class="empty"></div>
+
+    <div class="pager">
+        <button class="btn" id="prev-page">上一页</button>
+        <span id="page-info"></span>
+        <button class="btn" id="next-page">下一页</button>
+    </div>
+
 </div>
 
-<script>
-(() => {
-  "use strict";
+</div>
 
-  const PAGE_SIZE = 20;
-  let currentOffset = 0;
-  let currentTotal = 0;
+<div id="toast"></div>
 
-  const authToken = localStorage.getItem("arkatana_token") || null;
-  const authUsername = localStorage.getItem("arkatana_username") || null;
-  document.getElementById("sidebar-account").textContent = authUsername ? `👤 ${authUsername}` : "👤 未登录";
-
-  // -------------------------------------------------------------------
-  // 未开放的导航项先给个占位提示，跟首页一致
-  // -------------------------------------------------------------------
-  document.querySelectorAll("[data-name]").forEach((el) => {
-    const enabledNow = ["play", "database"];
-    if (enabledNow.includes(el.dataset.name)) return;
-    el.addEventListener("click", (e) => {
-      e.preventDefault();
-      showToast("这个功能还在开发中，敬请期待");
-    });
-  });
-
-  function showToast(text) {
-    // Database 页面没有专门的 toast 容器，简单用 alert 兜底即可，
-    // 这个交互不是本页面的重点
-    alert(text);
-  }
-
-  async function apiGet(path) {
-    const headers = {};
-    if (authToken) headers["X-Auth-Token"] = authToken;
-    const res = await fetch(path, { headers });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "请求失败");
-    return data;
-  }
-
-  function resultLabel(g) {
-    const S = window.ArkatanaShared;
-    if (!S) return { text: g.result, cls: "" };
-    const { text, outcome } = S.resultText(g);
-    return { text, cls: "outcome-" + outcome };
-  }
-
-  function formatDate(iso) {
-    if (!iso) return "-";
-    const d = new Date(iso);
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  }
-
-  function buildQuery(offset) {
-    const params = new URLSearchParams();
-    const player = document.getElementById("f-player").value.trim();
-    const opponent = document.getElementById("f-opponent").value.trim();
-    const mode = document.getElementById("f-mode").value;
-    const dateFrom = document.getElementById("f-date-from").value;
-    const dateTo = document.getElementById("f-date-to").value;
-
-    if (player) params.set("player", player);
-    if (opponent) params.set("opponent", opponent);
-    if (mode) params.set("rated", mode === "rated" ? "true" : "false");
-    if (dateFrom) params.set("date_from", dateFrom);
-    if (dateTo) params.set("date_to", dateTo);
-    params.set("limit", PAGE_SIZE);
-    params.set("offset", offset);
-    return params.toString();
-  }
-
-  function renderPagination() {
-    const el = document.getElementById("pagination");
-    if (currentTotal <= PAGE_SIZE) { el.innerHTML = ""; return; }
-    const page = Math.floor(currentOffset / PAGE_SIZE) + 1;
-    const totalPages = Math.ceil(currentTotal / PAGE_SIZE);
-    el.innerHTML = `
-      <button id="btn-prev-page" ${currentOffset === 0 ? "disabled" : ""}>◀ 上一页</button>
-      <span>第 ${page} / ${totalPages} 页　共 ${currentTotal} 局</span>
-      <button id="btn-next-page" ${currentOffset + PAGE_SIZE >= currentTotal ? "disabled" : ""}>下一页 ▶</button>
-    `;
-    document.getElementById("btn-prev-page").addEventListener("click", () => {
-      currentOffset = Math.max(0, currentOffset - PAGE_SIZE);
-      runSearch(currentOffset);
-    });
-    document.getElementById("btn-next-page").addEventListener("click", () => {
-      currentOffset += PAGE_SIZE;
-      runSearch(currentOffset);
-    });
-  }
-
-  async function runSearch(offset) {
-    const body = document.getElementById("result-body");
-    body.innerHTML = `<tr><td colspan="7" class="loading-note">搜索中…</td></tr>`;
-    currentOffset = offset;
-
-    try {
-      const data = await apiGet(`/database/search?${buildQuery(offset)}`);
-      currentTotal = data.total || 0;
-      const games = data.games || [];
-
-      if (games.length === 0) {
-        body.innerHTML = `<tr><td colspan="7" class="empty-note">没有找到符合条件的对局</td></tr>`;
-        renderPagination();
-        return;
-      }
-
-      body.innerHTML = "";
-      const S = window.ArkatanaShared;
-      games.forEach((g) => {
-        const { text: resultText, cls: resultCls } = resultLabel(g);
-        const timeText = g.time_control_minutes != null
-          ? `${g.time_control_minutes}+${g.time_control_increment}`
-          : "无限制";
-        const modeText = g.rated ? "rated" : "casual";
-
-        const tr = document.createElement("tr");
-        tr.className = "game-row";
-        tr.innerHTML = `
-          <td>${formatDate(g.updated_at)}</td>
-          <td>${S ? S.sideIcon("black", 15) : ""}${g.black_player || "匿名"}</td>
-          <td>${S ? S.sideIcon("white", 15) : ""}${g.white_player || "匿名"}</td>
-          <td>${timeText}</td>
-          <td>${modeText}</td>
-          <td>${g.move_count}</td>
-          <td class="result-text ${resultCls}">${resultText}</td>
-        `;
-        tr.addEventListener("click", () => {
-          window.location.href = `game.html?replay=${g.game_id}`;
-        });
-        body.appendChild(tr);
-      });
-
-      renderPagination();
-    } catch (err) {
-      body.innerHTML = `<tr><td colspan="7" class="empty-note">搜索失败：${err.message}</td></tr>`;
-    }
-  }
-
-  document.getElementById("btn-search").addEventListener("click", () => runSearch(0));
-  document.getElementById("btn-reset").addEventListener("click", () => {
-    document.getElementById("f-player").value = "";
-    document.getElementById("f-opponent").value = "";
-    document.getElementById("f-mode").value = "";
-    document.getElementById("f-date-from").value = "";
-    document.getElementById("f-date-to").value = "";
-    runSearch(0);
-  });
-
-  // 回车直接搜索，不用非得点按钮
-  ["f-player", "f-opponent"].forEach((id) => {
-    document.getElementById(id).addEventListener("keydown", (e) => {
-      if (e.key === "Enter") runSearch(0);
-    });
-  });
-
-  runSearch(0);
-})();
-</script>
+<script src="/app.js?v=10"></script>
+<script src="/database.js?v=10"></script>
 
 </body>
 </html>

@@ -38,10 +38,8 @@ from rules import (
     position_signature,
     other_side,
     is_checkmate,
-    has_only_throne,
-    EndReason,
 )
-from notation import compute_disambiguation, compute_pawn_disambiguation
+from notation import compute_disambiguation
 from clock import Clock, TimeControl
 
 
@@ -82,8 +80,6 @@ class Game:
         self.board: Board = setup_initial_board()
         self.current_side: Side = Side.BLACK  # 黑方先手
         self.result: GameResult = GameResult.ONGOING
-        # 对局是怎么结束的（对局进行中为 None）——决定结果文案怎么写
-        self.end_reason: EndReason | None = None
         self.move_log: list[MoveRecord] = []
 
         # 棋钟：time_control 为 None 表示无时间限制（比如"线下对练"模式）。
@@ -128,7 +124,6 @@ class Game:
             loser = self.current_side
             winner = other_side(loser)
             self.result = GameResult.WHITE_WINS if winner == Side.WHITE else GameResult.BLACK_WINS
-            self.end_reason = EndReason.TIMEDOUT
             return True
         return False
 
@@ -158,14 +153,7 @@ class Game:
         mover_side = self.current_side
         moving_piece = self.board.get(from_sq)
         was_already_promoted = moving_piece.promoted
-        if isinstance(moving_piece, Pawn):
-            # 兵的记谱规则跟其他棋子是两套独立逻辑，见 compute_pawn_disambiguation
-            is_capture_now = self.board.get(to_sq) is not None
-            disambiguation = compute_pawn_disambiguation(
-                from_sq, to_sq, is_capture_now, was_already_promoted
-            )
-        else:
-            disambiguation = compute_disambiguation(self.board, moving_piece, to_sq)
+        disambiguation = compute_disambiguation(self.board, moving_piece, to_sq)
 
         captured = apply_move(self.board, move)
         piece = self.board.get(to_sq)
@@ -208,11 +196,10 @@ class Game:
         """悔棋：还原到上一步棋之前的整局面快照（包含棋钟状态）"""
         if not self._undo_stack:
             raise IllegalMoveError("没有可悔的棋")
-        board, side, result, pos_history, clock, end_reason = self._undo_stack.pop()
+        board, side, result, pos_history, clock = self._undo_stack.pop()
         self.board = board
         self.current_side = side
         self.result = result
-        self.end_reason = end_reason
         self._position_history = pos_history
         self.clock = clock
         if self.move_log:
@@ -224,7 +211,6 @@ class Game:
             return
         winner = other_side(side)
         self.result = GameResult.WHITE_WINS if winner == Side.WHITE else GameResult.BLACK_WINS
-        self.end_reason = EndReason.RESIGNED
 
     # -- 内部工具 -----------------------------------------------------------
 
@@ -252,21 +238,12 @@ class Game:
         return False
 
     def _update_result(self) -> None:
-        """走完一步棋后，依次检查重复走子、杀城/残局，更新 self.result 与 end_reason"""
+        """走完一步棋后，依次检查重复走子、杀城/残局，更新 self.result"""
         if is_threefold_repetition(self._position_history):
             # 规则明确规定：三次重复走子固定判白方（后手）获胜，不是平局
             self.result = GameResult.WHITE_WINS
-            self.end_reason = EndReason.STALEMATE
             return
-
         self.result = evaluate_game_state(self.board, self.current_side)
-        if self.result == GameResult.ONGOING:
-            self.end_reason = None
-        elif has_only_throne(self.board, self.current_side):
-            # 只剩王城、无子可动 —— 困毙
-            self.end_reason = EndReason.STALEMATE
-        else:
-            self.end_reason = EndReason.CHECKMATE
 
     def _snapshot(self):
         return (
@@ -275,7 +252,6 @@ class Game:
             self.result,
             list(self._position_history),
             self.clock.clone(),
-            self.end_reason,
         )
 
     def __str__(self) -> str:
