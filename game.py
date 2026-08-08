@@ -41,7 +41,7 @@ from rules import (
     has_only_throne,
     EndReason,
 )
-from notation import compute_disambiguation
+from notation import compute_disambiguation, compute_pawn_disambiguation
 from clock import Clock, TimeControl
 
 
@@ -158,7 +158,14 @@ class Game:
         mover_side = self.current_side
         moving_piece = self.board.get(from_sq)
         was_already_promoted = moving_piece.promoted
-        disambiguation = compute_disambiguation(self.board, moving_piece, to_sq)
+        if isinstance(moving_piece, Pawn):
+            # 兵的记谱规则跟其他棋子是两套独立逻辑，见 compute_pawn_disambiguation
+            is_capture_now = self.board.get(to_sq) is not None
+            disambiguation = compute_pawn_disambiguation(
+                from_sq, to_sq, is_capture_now, was_already_promoted
+            )
+        else:
+            disambiguation = compute_disambiguation(self.board, moving_piece, to_sq)
 
         captured = apply_move(self.board, move)
         piece = self.board.get(to_sq)
