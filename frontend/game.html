@@ -47,6 +47,17 @@
     text-decoration: none;
     color: var(--parchment-light);
   }
+  #btn-quit-single {
+    margin-left: 18px;
+    padding: 5px 12px;
+    font-size: 12px;
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  #btn-quit-single:hover { background: rgba(192, 57, 43, 0.15); }
   header.top-bar .right-info {
     display: flex;
     align-items: center;
@@ -459,6 +470,7 @@
 
 <header class="top-bar">
   <a class="brand" href="index.html">古 戰 棋　ARKATANA</a>
+  <button id="btn-quit-single" style="display:none;" title="退出，不保留这局记录">✕ Quit</button>
   <div class="right-info">
     <span id="auth-status-mini">未登录</span>
     <span id="game-id-chip">对局: -</span>
@@ -502,7 +514,7 @@
       </div>
     </div>
 
-    <div class="action-row">
+    <div class="action-row" id="action-row-normal">
       <div class="action-btn-wrap" id="action-undo">
         <button class="icon-btn" id="btn-undo" title="retake（悔棋，需对方同意）">↺</button>
         <button class="cancel-x" id="cancel-undo">✕</button>
@@ -514,6 +526,12 @@
       <div class="action-btn-wrap" id="action-resign">
         <button class="icon-btn" id="btn-resign" title="resign（认输）">⚑</button>
         <button class="cancel-x" id="cancel-resign">✕</button>
+      </div>
+    </div>
+
+    <div class="action-row" id="action-row-single" style="display:none;">
+      <div class="action-btn-wrap">
+        <button class="icon-btn" id="btn-single-undo" title="撤回上一步">↩️</button>
       </div>
     </div>
 
@@ -545,7 +563,7 @@
   </div>
 
   <!-- 右栏：对局信息 + 聊天室 -->
-  <aside class="side-col">
+  <aside class="side-col" id="right-info-col">
     <div class="card game-info-card">
       <h2>对局信息</h2>
       <div class="tc-line" id="tc-line">- </div>
@@ -590,8 +608,8 @@
     parchDark: "#cbb98d",
     cinnabar: "#a6362b",
     jade: "#3f6656",
-    gold: "#e0a92a",   // 走棋提示：高饱和金色
-    lastMove: "rgba(214, 168, 60, 0.45)",   // 走子标注：金橙色
+    gold: "#e0a92a",   // 高饱和金色（选中格描边用）
+    lastMove: "rgba(228, 166, 103, 0.55)",   // 走棋提示：饱和度70%的浅橙色
     checkGlow: "rgba(196, 45, 45, 0.55)",
   };
 
@@ -636,6 +654,7 @@
   let moveMeta = [];
   let viewIndex = null;
   let replayOnly = false;   // true = 纯复盘页面（没有实时对局），进来就是只读
+  let singleMode = false;   // true = Single game（本机双人对战），界面精简、不认领任何一方
   let lastEndReason = null; // 这局是怎么结束的（resigned/checkmate/timedout/...）
 
   let authToken = localStorage.getItem("arkatana_token") || null;
@@ -885,22 +904,16 @@
     const [cx, cy] = overrideCenter || squareToPixelCenter(sq);
     const P = window.ArkatanaPieces;
     // 按棋子在屏幕上的显示位置选左版/右版素材（跟视角翻转联动），
-    // 走到正中 f 线时沿用原朝向，不突兀翻面
-    const img = P ? P.getImage(info.piece, info.side, sq, boardFlipped, orientationBySquare[sq]) : null;
+    // 走到正中 f 线时沿用原朝向，不突兀翻面；升变了就直接换成专门的
+    // 升变造型素材（黑方铜色/白方金色），瞬间切换，不再叠加描边效果
+    const img = P
+      ? P.getImage(info.piece, info.side, sq, boardFlipped, orientationBySquare[sq], info.promoted)
+      : null;
 
     if (img) {
       // 素材是正方形画布里的居中造型，按各棋子的比例等比缩放画上去
       const size = CELL * (P ? P.pieceScale(info.piece) : 0.9);
       ctx.drawImage(img, cx - size / 2, cy - size / 2, size, size);
-
-      if (info.promoted) {
-        // 升变标记：暂时统一金色边框；
-        // 正式版将区分为 白棋升变→金色 / 黑棋升变→铜色
-        const box = CELL * 0.92;
-        ctx.strokeStyle = COLORS.gold;
-        ctx.lineWidth = 2.5;
-        ctx.strokeRect(cx - box / 2, cy - box / 2, box, box);
-      }
       return;
     }
 
@@ -1025,7 +1038,7 @@
 
   function renderOfferBanner(offer) {
     const el = document.getElementById("offer-banner");
-    if (!offer || gameResult !== "ongoing") {
+    if (singleMode || !offer || gameResult !== "ongoing") {
       el.style.display = "none";
       el.innerHTML = "";
       return;
@@ -1245,7 +1258,7 @@
    * 否则只提示可以回到最新局面（这时候说"轮到你了"是不准确的）。
    */
   function renderTurnBanner() {
-    if (replayOnly || !isBrowsingHistory() || gameResult !== "ongoing") {
+    if (singleMode || replayOnly || !isBrowsingHistory() || gameResult !== "ongoing") {
       turnBannerEl.style.display = "none";
       turnBannerEl.innerHTML = "";
       return;
@@ -1331,6 +1344,35 @@
   });
   document.getElementById("btn-game-review").addEventListener("click", () => {
     window.location.href = `game.html?replay=${gameId}`;
+  });
+
+  // -------------------------------------------------------------------
+  // Single game（本机双人对战）：精简界面，不显示时间控制/双方信息/
+  // 对局信息/聊天室/悔棋提和认输的协商按钮，换成一个即时撤回 + Quit。
+  // -------------------------------------------------------------------
+  function applySingleModeLayout() {
+    ["player-card-top", "player-card-bottom", "right-info-col"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = "none";
+    });
+    document.getElementById("action-row-normal").style.display = "none";
+    document.getElementById("action-row-single").style.display = "flex";
+    document.getElementById("btn-quit-single").style.display = "inline-block";
+  }
+
+  document.getElementById("btn-single-undo").addEventListener("click", async () => {
+    try {
+      const state = await apiPost(`/games/${gameId}/undo`);
+      handleIncomingState(state);
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
+
+  document.getElementById("btn-quit-single").addEventListener("click", () => {
+    // single game 本来就完全不落库，这里不需要额外通知后端"别保存"——
+    // 直接离开就行，这局数据本来就只存在于这一次的内存里
+    window.location.href = "index.html";
   });
 
   function setMessage(text) { messageEl.textContent = text || ""; }
@@ -1762,6 +1804,12 @@
   const urlParams = new URLSearchParams(window.location.search);
   const paramId = urlParams.get("id");
   const paramReplay = urlParams.get("replay");
+  const paramSingle = urlParams.get("single") === "1";
+
+  if (paramSingle) {
+    singleMode = true;
+    applySingleModeLayout();
+  }
 
   if (paramReplay) {
     startReplay(paramReplay).catch((e) => setMessage("复盘加载失败：" + e.message));

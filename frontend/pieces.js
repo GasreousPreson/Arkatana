@@ -63,6 +63,10 @@
   const VARIANT_PIECES = ["ballista", "chariot", "hussar", "knight",
                           "phoenix", "swordsman", "turret"];
 
+  // 能升变的棋子：战车/剑士/炮塔（有左右两版）+ 兵（单一朝向）——
+  // 升变后瞬间切换成专门画的"升变造型"素材，不再用旧版的金边叠加效果。
+  const PROMOTABLE = new Set(["T", "S", "C", ""]);
+
   /**
    * 这枚棋子该用哪张素材。
    *
@@ -73,11 +77,12 @@
    *
    * @param {boolean} flipped 当前是否是白方视角（棋盘左右上下翻转）
    */
-  function pieceImagePath(notation, side, square, flipped, stickyVariant) {
+  function pieceImagePath(notation, side, square, flipped, stickyVariant, promoted) {
     const piece = PIECE_FILES[notation];
     if (piece === undefined) return null;
-    if (NO_VARIANT.has(notation)) return `${BASE}${side}_${piece}.png`;
-    return `${BASE}${side}_${piece}_${resolveVariant(square, flipped, stickyVariant)}.png`;
+    const suffix = (promoted && PROMOTABLE.has(notation)) ? "_promoted" : "";
+    if (NO_VARIANT.has(notation)) return `${BASE}${side}_${piece}${suffix}.png`;
+    return `${BASE}${side}_${piece}${suffix}_${resolveVariant(square, flipped, stickyVariant)}.png`;
   }
 
   /**
@@ -112,6 +117,12 @@
         paths.push(`${BASE}${side}_${p}_l.png`);
         paths.push(`${BASE}${side}_${p}_r.png`);
       });
+      // 升变造型：战车/剑士/炮塔左右两版 + 兵单一朝向
+      ["chariot", "swordsman", "turret"].forEach((p) => {
+        paths.push(`${BASE}${side}_${p}_promoted_l.png`);
+        paths.push(`${BASE}${side}_${p}_promoted_r.png`);
+      });
+      paths.push(`${BASE}${side}_pawn_promoted.png`);
     });
     readyPromise = Promise.all(paths.map((path) => new Promise((resolve) => {
       const img = new Image();
@@ -123,8 +134,8 @@
   }
 
   /** 取已加载好的素材；没有则返回 null（调用方退回占位画法） */
-  function getImage(notation, side, square, flipped, stickyVariant) {
-    const path = pieceImagePath(notation, side, square, flipped, stickyVariant);
+  function getImage(notation, side, square, flipped, stickyVariant, promoted) {
+    const path = pieceImagePath(notation, side, square, flipped, stickyVariant, promoted);
     return path ? (cache[path] || null) : null;
   }
 

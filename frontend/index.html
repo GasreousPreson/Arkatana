@@ -373,16 +373,12 @@
   }
   .side-option.selected { opacity: 1; }
   .side-option.locked { cursor: not-allowed; }
-  .side-option .side-icon {
-    width: 26px; height: 26px;
-    border-radius: 50%;
+  .side-option .side-icon-wrap {
+    width: 34px; height: 24px;
     margin: 0 auto 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--parchment-light);
   }
-  .side-option[data-side="black"] .side-icon { background: var(--cinnabar); }
-  .side-option[data-side="random"] .side-icon {
-    background: linear-gradient(135deg, var(--cinnabar) 50%, var(--jade) 50%);
-  }
-  .side-option[data-side="white"] .side-icon { background: var(--jade); }
 
   #cg-create-btn { margin-top: 16px; text-align: center; }
 
@@ -494,7 +490,7 @@
     <!-- 右列：创建对局入口 + Leaderboard -->
     <aside class="right-column">
       <button class="action-btn" id="btn-create-game">⚔️ Create a game</button>
-      <button class="action-btn disabled" data-name="friend-game">👥 Play with a friend</button>
+      <button class="action-btn" id="btn-single-game">👤 Single game</button>
       <button class="action-btn disabled" data-name="ai-game">🤖 Play against ai</button>
 
       <div class="panel disabled">
@@ -544,13 +540,13 @@
 
     <div class="side-row">
       <div class="side-option" data-side="black" id="cg-side-black">
-        <div class="side-icon"></div>black
+        <div class="side-icon-wrap" id="cg-icon-black"></div>black
       </div>
       <div class="side-option" data-side="random" id="cg-side-random">
-        <div class="side-icon"></div>random side
+        <div class="side-icon-wrap" id="cg-icon-random"></div>random side
       </div>
       <div class="side-option" data-side="white" id="cg-side-white">
-        <div class="side-icon"></div>white
+        <div class="side-icon-wrap" id="cg-icon-white"></div>white
       </div>
     </div>
 
@@ -929,6 +925,13 @@
   const cgCreateBtn = document.getElementById("cg-create-btn");
   const cgMsg = document.getElementById("cg-msg");
 
+  // 执黑/随机/执白 图标：跟大厅、对局界面用同一套城堡剪影素材
+  if (window.ArkatanaShared) {
+    document.getElementById("cg-icon-black").innerHTML = window.ArkatanaShared.sideIcon("black", 30);
+    document.getElementById("cg-icon-random").innerHTML = window.ArkatanaShared.sideIcon("random", 30);
+    document.getElementById("cg-icon-white").innerHTML = window.ArkatanaShared.sideIcon("white", 30);
+  }
+
   cgMinutesSlider.max = ALLOWED_MINUTES.length - 1;
   cgIncrementSlider.max = ALLOWED_INCREMENTS.length - 1;
 
@@ -1015,6 +1018,15 @@
       cgMsg.textContent = err.message;
       cgCreateBtn.textContent = "Create lobby game";
       cgCreateBtn.disabled = false;
+    }
+  });
+
+  document.getElementById("btn-single-game").addEventListener("click", async () => {
+    try {
+      const data = await apiPost("/games", { single_device: true });
+      window.location.href = `game.html?id=${data.game_id}&single=1`;
+    } catch (err) {
+      showToast("创建失败：" + err.message);
     }
   });
 

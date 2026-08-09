@@ -106,6 +106,11 @@ GAME_DRAW_COUNT: dict[str, dict] = {}
 OFFER_COOLDOWN_SECONDS = 60
 MAX_DRAW_OFFERS_PER_SIDE = 2
 
+# "Single game"（单设备本机对战，两人轮流用同一个浏览器）用的临时对局：
+# 完全不写数据库——不出现在大厅、Game History、Database 里，
+# 服务器重启就没了，就是一次性的本地演练，不是真正意义上的"一局对局"。
+EPHEMERAL_GAMES: set[str] = set()
+
 # 内存登录令牌存储：{token: username}
 # 注意：这是临时方案，服务器重启后所有人都需要重新登录。
 # 以后如果需要"记住登录状态"，可以把这张表也存进数据库。
@@ -171,6 +176,8 @@ class CreateGameRequest(BaseModel):
     rated: bool = False
     minutes_per_side: int | None = None  # None 表示无时间限制（比如"线下对练"）
     increment_seconds: int = 0
+    single_device: bool = False          # True = "Single game"：同一台设备两人轮流下，
+                                          # 不落库、不认领任何一方（双方都能操作）
 
 
 class RegisterRequest(BaseModel):
@@ -280,6 +287,8 @@ def persist(
     rated: bool | None = None,
 ) -> None:
     """把当前对局状态存入数据库（每次影响状态的操作后都应调用）"""
+    if game_id in EPHEMERAL_GAMES:
+        return  # single game：压根不落库，不计入大厅/历史/对局库
     db.save_game(
         game_id, game,
         black_player=black_player, white_player=white_player, rated=rated,
@@ -531,10 +540,16 @@ async def create_game(
         # 悄无声息地发生；应该让调用方知道，去重新登录。
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录后再创建对局")
 
+    single_device = bool(body.single_device) if body else False
     preference = (body.side_preference if body else "random").strip().lower()
     rated = bool(body.rated) if body else False
     minutes_per_side = body.minutes_per_side if body else None
     increment_seconds = (body.increment_seconds if body else 0) or 0
+
+    if single_device and rated:
+        raise HTTPException(status_code=400, detail="single game 不支持 rated")
+    if single_device:
+        minutes_per_side = None  # single game 不显示也不需要时间控制
 
     if rated and preference != "random":
         raise HTTPException(status_code=400, detail="rated 对局只能随机先后手，不能指定执黑/执白")
@@ -548,6 +563,17 @@ async def create_game(
 
     game_id = uuid.uuid4().hex[:8]
     GAMES[game_id] = Game(time_control=time_control)
+
+    if single_device:
+        # 本机双人对战：同一个人/同一个浏览器操作两边，不认领任何一方
+        # （两边都不设归属，走棋权限检查自然对双方都放行），也完全不落库。
+        EPHEMERAL_GAMES.add(game_id)
+        GAME_PLAYERS[game_id] = {"black": None, "white": None}
+        GAME_RATED[game_id] = False
+        start_game_if_needed(GAMES[game_id])
+        state = game_state(game_id, GAMES[game_id])
+        await manager.broadcast(game_id, state)
+        return {**state, "my_side": None}
 
     black_slot: str | None = None
     white_slot: str | None = None
