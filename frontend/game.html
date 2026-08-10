@@ -25,6 +25,7 @@
     background: var(--ink);
     color: var(--parchment-light);
     font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
   }
 
   a { color: var(--gold); }
@@ -90,13 +91,16 @@
     align-items: start;
   }
 
-  .area-top-card    { grid-area: top-card; }
-  .area-board        { grid-area: board; display: flex; flex-direction: column; align-items: center; gap: 6px; }
-  .area-bottom-card { grid-area: bottom-card; }
-  .area-move-nav    { grid-area: move-nav; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
-  .area-banners      { grid-area: banners; display: flex; flex-direction: column; gap: 8px; }
-  .area-actions       { grid-area: actions; }
-  .area-info-chat   { grid-area: info-chat; display: flex; flex-direction: column; gap: 10px; }
+  /* min-width:0 是关键：Grid/Flex 子项默认的最小宽度是"内容本身的完整宽度"，
+     如果不显式清零，棋谱这种横向不换行的内容会把整条网格列撑宽，
+     导致棋谱、按钮、聊天室看起来比棋盘还宽、还会顶到屏幕外面去。 */
+  .area-top-card    { grid-area: top-card;    min-width: 0; }
+  .area-board        { grid-area: board;       min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .area-bottom-card { grid-area: bottom-card; min-width: 0; }
+  .area-move-nav    { grid-area: move-nav;    min-width: 0; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .area-banners      { grid-area: banners;     min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .area-actions       { grid-area: actions;     min-width: 0; }
+  .area-info-chat   { grid-area: info-chat;   min-width: 0; display: flex; flex-direction: column; gap: 10px; }
 
   .area-move-nav .move-list-card { flex: 1; max-height: 260px; }
 
@@ -132,6 +136,8 @@
     background: var(--gold-soft);
     border-radius: 4px;
     padding: 12px 14px;
+    width: 100%;
+    box-sizing: border-box;
   }
   .card h2 {
     font-size: 12px;
@@ -198,6 +204,8 @@
     max-height: 260px;
     overflow-y: auto;
     padding: 8px 10px;
+    width: 100%;
+    box-sizing: border-box;
   }
   #history-log {
     list-style: none;
@@ -218,6 +226,8 @@
     display: flex;
     gap: 8px;
     justify-content: center;
+    width: 100%;
+    box-sizing: border-box;
   }
   .action-btn-wrap {
     position: relative;
@@ -309,12 +319,26 @@
   /* 兵之间排得更紧凑一些 */
   .piece-chip.pawn-chip { width: 21px; height: 21px; margin-left: -7px; }
 
-  #board-wrap { position: relative; max-width: 92vw; }
+  #board-wrap {
+    position: relative;   /* 终局弹窗要相对这个容器居中，见 #result-overlay */
+    max-width: 92vw;
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    outline: none;
+  }
   canvas#board {
     background: var(--parchment-light);
     max-width: 100%;
     height: auto;
     cursor: pointer;
+    /* 移动端点击默认会闪一下半透明蓝色高亮，体验很差，这里关掉。
+       同时在 canvas 和它的外层容器都设置，避免只设一层不生效。
+       touch-action:manipulation 顺带禁掉双击缩放，避免快速点两下棋子
+       被浏览器当成"想放大"而吞掉第二次点击。 */
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
+    outline: none;
+    user-select: none;
   }
 
   #message-line {
@@ -331,7 +355,7 @@
   /* ---------------------------------------------------------------- */
   #result-overlay {
     display: none;
-    position: fixed;
+    position: absolute;
     inset: 0;
     background: rgba(0,0,0,0.6);
     z-index: 50;
@@ -562,29 +586,38 @@
     .clock-box .time { font-size: 18px; }
     .clock-box { padding: 4px 8px; }
 
-    /* 棋谱横向卷带：不换行、超出部分靠左右按钮"翻页"滚动，
-       而不是让文本无限往右撑开容器 */
+    /* 棋谱横向卷带：固定宽度，不换行，超出部分靠滚动查看，
+       而不是让文本无限往右撑开容器（这才是"卷尺"式效果的关键——
+       容器本身宽度锁死，新招法出现时旧招法自然被滚动挤到看不见的地方，
+       不是容器本身在变宽）。 */
     .area-move-nav .move-list-card {
       max-height: none;
       overflow: hidden;
       padding: 6px 8px;
+      width: 100%;
+      box-sizing: border-box;
     }
     .area-move-nav #history-log {
       display: flex;
       flex-wrap: nowrap;
       overflow-x: auto;
       scroll-behavior: smooth;
-      gap: 14px;
+      gap: 8px;              /* 招法间距缩小 */
+      width: 100%;
+      box-sizing: border-box;
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
     .area-move-nav #history-log::-webkit-scrollbar { display: none; }
     .area-move-nav #history-log li {
       display: flex;
-      gap: 6px;
+      gap: 4px;               /* 招法间距缩小 */
       flex-shrink: 0;
       white-space: nowrap;
     }
+    /* 手机上不需要桌面那种"每步至少留68px对齐"的规则，
+       让招法紧凑排列，一屏能看到更多步 */
+    .area-move-nav #history-log li span.mv { min-width: 0; }
 
     .area-actions .icon-btn { padding: 8px 0; font-size: 16px; }
 
@@ -641,6 +674,21 @@
     <div class="captured-row" id="captured-top"></div>
     <div id="board-wrap">
       <canvas id="board" width="726" height="792"></canvas>
+
+      <!-- 终局结算弹窗：相对棋盘（board-wrap）居中，不是相对整个视口——
+           这样不管页面滚动到哪、总高度多少，弹窗都精确出现在棋盘正中央 -->
+      <div id="result-overlay">
+        <div id="result-panel">
+          <div id="result-icon"></div>
+          <div class="result-text" id="result-text"></div>
+          <div id="result-players"></div>
+          <div class="result-actions">
+            <button id="btn-rematch">Rematch</button>
+            <button id="btn-game-review">Game review</button>
+            <button id="btn-back-lobby">Back to lobby</button>
+          </div>
+        </div>
+      </div>
     </div>
     <div class="captured-row" id="captured-bottom"></div>
 
@@ -723,20 +771,6 @@
     </div>
   </div>
 
-</div>
-
-<!-- 终局结算弹窗：独立于网格布局之外，居中悬浮在最上层 -->
-<div id="result-overlay">
-  <div id="result-panel">
-    <div id="result-icon"></div>
-    <div class="result-text" id="result-text"></div>
-    <div id="result-players"></div>
-    <div class="result-actions">
-      <button id="btn-rematch">Rematch</button>
-      <button id="btn-game-review">Game review</button>
-      <button id="btn-back-lobby">Back to lobby</button>
-    </div>
-  </div>
 </div>
 
 <script src="pieces.js"></script>
