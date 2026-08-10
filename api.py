@@ -104,6 +104,11 @@ GAME_OFFERS: dict[str, dict] = {}
 GAME_COOLDOWN: dict[str, dict] = {}
 GAME_DRAW_COUNT: dict[str, dict] = {}
 
+# 对局结束时的评分变化（只有 rated + 双方都注册 + 分出胜负 才会有值）：
+# {game_id: {"black": {"before": 旧分, "after": 新分, "delta": 差值}, "white": {...}}}
+# 终局结算弹窗用这个显示"+14 / -13"式的升降箭头。
+GAME_RATING_DELTAS: dict[str, dict] = {}
+
 OFFER_COOLDOWN_SECONDS = 60
 MAX_DRAW_OFFERS_PER_SIDE = 2
 
@@ -253,6 +258,7 @@ def game_state(game_id: str, game: Game) -> dict:
         "in_check": is_in_check(game.board, game.current_side) if game.result.value == "ongoing" else False,
         "pending_offer": GAME_OFFERS.get(game_id),
         "end_reason": game.end_reason.value if game.end_reason else None,
+        "rating_delta": GAME_RATING_DELTAS.get(game_id),
         "legal_moves": legal_map,
         "last_move_from": coord_to_str(*last_move_record.from_sq) if last_move_record else None,
         "last_move_to": coord_to_str(*last_move_record.to_sq) if last_move_record else None,
@@ -290,6 +296,7 @@ async def persist(
     black_player: str | None = None,
     white_player: str | None = None,
     rated: bool | None = None,
+    was_random_side: bool | None = None,
 ) -> None:
     """
     把当前对局状态存入数据库（每次影响状态的操作后都应调用）。
@@ -309,6 +316,7 @@ async def persist(
         db.save_game,
         game_id, game,
         black_player=black_player, white_player=white_player, rated=rated,
+        was_random_side=was_random_side,
     )
 
 
@@ -327,7 +335,21 @@ def maybe_finalize_rating(game_id: str, game: Game) -> None:
         # 这需要扩展评分模块，暂时先不结算，避免把和棋错算成某一方获胜。
         return
     winner = "black" if game.result == GameResult.BLACK_WINS else "white"
-    db.finalize_rated_game(game_id, winner)
+
+    players = get_players_cached(game_id)
+    black_before = db.get_rating(players["black"])[0] if players["black"] else None
+    white_before = db.get_rating(players["white"])[0] if players["white"] else None
+
+    outcome = db.finalize_rated_game(game_id, winner)
+    if outcome is None:
+        return  # 不满足结算条件（非rated/有一方匿名/无时间限制/已经结算过），没有变化量可存
+    new_black, new_white = outcome
+    GAME_RATING_DELTAS[game_id] = {
+        "black": {"before": black_before, "after": new_black, "delta": new_black - black_before}
+                 if black_before is not None else None,
+        "white": {"before": white_before, "after": new_white, "delta": new_white - white_before}
+                 if white_before is not None else None,
+    }
 
 
 def start_game_if_needed(game: Game) -> bool:
@@ -578,6 +600,15 @@ async def create_game(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    if creator is not None and not single_device:
+        # 登录用户再创建一局之前，先把自己名下还在大厅里等待、没人加入的
+        # 旧房间清掉——不然每点一次 Create a game 就多攒一个"僵尸房间"，
+        # 大厅会被自己刷屏。single game 不受影响，那是临时对局，本来就
+        # 不落库，不会有"堆积"的问题。
+        stale_id = db.find_pending_room_for_user(creator)
+        if stale_id is not None:
+            _discard_game(stale_id)
+
     game_id = uuid.uuid4().hex[:8]
     GAMES[game_id] = Game(time_control=time_control)
 
@@ -621,7 +652,11 @@ async def create_game(
             else:
                 claims["white"] = x_guest_id
 
-    await persist(game_id, GAMES[game_id], black_player=black_slot, white_player=white_slot, rated=rated)
+    await persist(
+        game_id, GAMES[game_id],
+        black_player=black_slot, white_player=white_slot, rated=rated,
+        was_random_side=(preference not in ("black", "white")),
+    )
 
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
@@ -692,6 +727,16 @@ async def start_game(
     return {**state, "my_side": resolve_my_side(game_id, username, x_guest_id)}
 
 
+def _discard_game(game_id: str) -> None:
+    """彻底清掉一局对局的所有痕迹（内存 + 数据库）——用于取消房间/自动顶替旧房间。"""
+    GAMES.pop(game_id, None)
+    GAME_PLAYERS.pop(game_id, None)
+    GAME_GUEST_CLAIMS.pop(game_id, None)
+    GAME_RATED.pop(game_id, None)
+    EPHEMERAL_GAMES.discard(game_id)
+    db.delete_game(game_id)
+
+
 @app.post("/games/{game_id}/cancel")
 def cancel_game(
     game_id: str,
@@ -709,12 +754,7 @@ def cancel_game(
         raise HTTPException(status_code=409, detail="对局已经开始，不能取消，只能认输")
 
     authorize_participant(game_id, x_auth_token, x_guest_id)
-
-    GAMES.pop(game_id, None)
-    GAME_PLAYERS.pop(game_id, None)
-    GAME_GUEST_CLAIMS.pop(game_id, None)
-    GAME_RATED.pop(game_id, None)
-    db.delete_game(game_id)
+    _discard_game(game_id)
 
     return {"cancelled": True}
 
@@ -779,6 +819,7 @@ async def make_move(
     players = get_players_cached(game_id)
     claims = get_guest_claims(game_id)
     side_key = game.current_side.value
+    other_key = "white" if side_key == "black" else "black"
     mover_slot = players[side_key]
     guest_slot = claims[side_key]
 
@@ -789,6 +830,12 @@ async def make_move(
     elif guest_slot is not None:
         if x_guest_id != guest_slot:
             raise HTTPException(status_code=403, detail="还没轮到你，这不是你的回合")
+    elif players[other_key] is not None:
+        # 这一方自己还没被认领（不是账号也不是访客），但对方已经是真实账号了——
+        # 说明这是一局"账号对局"，不能让任何路人（不管是别的访客还是恰好
+        # 也登录了同一账号的另一个浏览器）不打招呼就直接把这一方的棋走了，
+        # 必须先 /join 正式认领这一方才行。
+        raise HTTPException(status_code=403, detail="这局对局需要先加入（join）才能走棋")
 
     try:
         from_sq = parse_coord(move.from_sq)
@@ -1054,6 +1101,7 @@ def get_replay(game_id: str):
                 "notation": step["notation"],
                 "from_sq": step.get("from_sq"),
                 "to_sq": step.get("to_sq"),
+                "in_check": step.get("in_check", False),
                 "board": board_to_json(board),
             })
         # 第0步（还没走任何棋）的初始局面也要给前端——

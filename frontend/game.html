@@ -354,16 +354,25 @@
   /* 终局结算弹窗：居中悬浮，带遮罩，独立于网格布局之外                    */
   /* ---------------------------------------------------------------- */
   #result-overlay {
-    display: none;
     position: absolute;
     inset: 0;
     background: rgba(0,0,0,0.6);
     z-index: 50;
+    display: flex;
     align-items: center;
     justify-content: center;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.5s ease;   /* 0.5秒渐入/渐出 */
   }
-  #result-overlay.open { display: flex; }
+  #result-overlay.open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
   #result-panel {
+    position: relative;   /* 让右上角的关闭按钮相对这个卡片定位 */
     text-align: center;
     background: var(--ink-raised);
     border: 1px solid var(--gold);
@@ -373,6 +382,19 @@
     max-width: 90vw;
   }
   #result-icon { margin: 0 auto 10px; width: 48px; height: 48px; color: var(--parchment-light); }
+  #result-close {
+    position: absolute;
+    top: 8px; right: 10px;
+    background: none;
+    border: none;
+    color: var(--parchment-light);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.7;
+    padding: 4px;
+  }
+  #result-close:hover { opacity: 1; }
   #result-icon svg { width: 100%; height: 100%; }
   #result-panel .result-text {
     font-size: 15px;
@@ -679,6 +701,7 @@
            这样不管页面滚动到哪、总高度多少，弹窗都精确出现在棋盘正中央 -->
       <div id="result-overlay">
         <div id="result-panel">
+          <button id="result-close" title="关闭">✕</button>
           <div id="result-icon"></div>
           <div class="result-text" id="result-text"></div>
           <div id="result-players"></div>
@@ -1405,10 +1428,11 @@
     prevBoardState = nextBoard;
     if (!detected) { renderCurrentView(); return; }
 
-    // 最后一步且这局是被绝杀结束的，就用绝杀音效收尾
+    // 绝杀（最后一步、且这局是被杀城结束的）优先于普通将军；
+    // 普通将军这一步单独播 check.mp3，不叠加走子/吃子音效
     const isLastStep = stepIndex === positionHistory.length - 1;
     const isMate = isLastStep && gameResult !== "ongoing" && lastEndReason === "checkmate";
-    startMoveAnimation(detected, meta.side, false, isMate);
+    startMoveAnimation(detected, meta.side, !!meta.in_check, isMate);
   }
 
   /** 按当前 viewIndex 把棋盘、吃子栏、棋谱高亮、导航按钮全部刷新一遍 */
@@ -1498,6 +1522,7 @@
         side: step.side,
         from_sq: step.from_sq,
         to_sq: step.to_sq,
+        in_check: !!step.in_check,
       });
     });
     historyEntries = moveMeta.slice(1).map((m) => m.notation);
@@ -1758,12 +1783,22 @@
     }
   }
 
+  let resultRevealTimer = null;
+  let resultAlreadyShown = false;   // 避免同一次终局被重复触发delay/渐入
+
+  function closeResultOverlay() {
+    if (resultRevealTimer) { clearTimeout(resultRevealTimer); resultRevealTimer = null; }
+    document.getElementById("result-overlay").classList.remove("open");
+  }
+
   function renderResultPanel(state) {
     const overlayEl = document.getElementById("result-overlay");
     if (state.result === "ongoing") {
-      overlayEl.classList.remove("open");
+      closeResultOverlay();
+      resultAlreadyShown = false;   // 万一悔棋悔回了进行中，下次结束要能重新弹出
       return;
     }
+
     const S = window.ArkatanaShared;
     const { text, outcome } = S ? S.resultText(state) : { text: state.result, outcome: "none" };
     resultTextEl.textContent = text;
@@ -1798,8 +1833,27 @@
       playersEl.appendChild(row);
     });
 
-    overlayEl.classList.add("open");
+    // 从 Game review / Game History / Database 进复盘时完全不弹这个窗——
+    // 复盘是"回顾"，不是"刚打完"，不需要这种带延迟的仪式感揭晓效果。
+    if (replayOnly) return;
+
+    // 同一次终局只安排一次延迟揭晓，不会因为状态重复推送（HTTP响应+广播各一次）
+    // 就重新排一次 setTimeout、让渐入效果重来一遍
+    if (resultAlreadyShown) return;
+    resultAlreadyShown = true;
+
+    if (resultRevealTimer) clearTimeout(resultRevealTimer);
+    resultRevealTimer = setTimeout(() => {
+      overlayEl.classList.add("open");
+      resultRevealTimer = null;
+    }, 1800);
   }
+
+  document.getElementById("result-close").addEventListener("click", closeResultOverlay);
+  // 点遮罩本身（不是点里面的卡片）也能关闭；点卡片内部不会误触发关闭
+  document.getElementById("result-overlay").addEventListener("click", (e) => {
+    if (e.target.id === "result-overlay") closeResultOverlay();
+  });
 
   function detectMove(prev, next, fromSq, toSq) {
     // 用后端给的 last_move_from/to 定位这一步棋，再从前后棋盘取出

@@ -45,6 +45,7 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, F
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from game import Game
+from rules import is_in_check
 from board import parse_coord, coord_to_str
 from notation import format_game, board_to_position_string, parse_move_notation, move_notation
 import rating as rating_module
@@ -160,6 +161,12 @@ class GameRecord(Base):
     # disconnected/agreement，进行中为空
     end_reason = Column(String, nullable=True)
 
+    # 创建时选的是不是"随机先后手"——跟"最终实际分到了哪一方"是两回事。
+    # 大厅显示要用这个：选了 random 的房间应该始终显示"random"图标，
+    # 不能把分配结果（black_player/white_player 谁先填上）泄露出去，
+    # 不然"随机"这件事本身就失去意义了。
+    was_random_side = Column(Boolean, default=False, nullable=False)
+
     # 是否是排位对局；rating_applied 防止评分结算被重复触发
     rated = Column(Boolean, default=False, nullable=False)
     rating_applied = Column(Boolean, default=False, nullable=False)
@@ -253,11 +260,12 @@ def save_game(
     black_player: Optional[str] = None,
     white_player: Optional[str] = None,
     rated: Optional[bool] = None,
+    was_random_side: Optional[bool] = None,
     session_factory=None,
 ) -> None:
     """
     把一局棋的当前状态存入数据库；已存在则更新，不存在则新建。
-    black_player / white_player / rated 是"可选覆盖"参数：
+    black_player / white_player / rated / was_random_side 是"可选覆盖"参数：
     - 新建时：直接采用传入的值（可以是 None，代表暂时还没人认领这一方 / 还没确定rated）
     - 更新时：只有传入非 None 的值才会覆盖已有记录，传 None 表示"不改动这个字段"
       （这样日常走棋/悔棋调用不需要每次都带上这些信息，也不会不小心把已有设定清空）
@@ -294,6 +302,7 @@ def save_game(
                 black_player=black_player,
                 white_player=white_player,
                 rated=bool(rated),
+                was_random_side=bool(was_random_side),
                 time_control_minutes=tc_minutes,
                 time_control_increment=tc_increment,
                 black_time_remaining=black_time,
@@ -433,6 +442,10 @@ def replay_steps(game_id: str, session_factory=None) -> list[dict]:
                 "from_sq": coord_to_str(*from_sq),
                 "to_sq": coord_to_str(*to_sq),
                 "position": board_to_position_string(game.board, game.current_side),
+                # 这一步是不是将军——复盘时播放音效要用（将军播 check.mp3，
+                # 不是普通走子/吃子音效）。这个不落库，跟局面本身一样是
+                # 重放到这一步时顺手现算出来的。
+                "in_check": is_in_check(game.board, game.current_side),
             })
 
     return steps
@@ -464,6 +477,29 @@ def delete_game(game_id: str, session_factory=None) -> bool:
         session.delete(record)
         session.commit()
         return True
+
+
+def find_pending_room_for_user(username: str, session_factory=None) -> Optional[str]:
+    """
+    查找某个登录用户名下"还在大厅里等待、自己创建的"那个房间（如果有的话），
+    返回它的 game_id；没有则返回 None。
+
+    用于"再次点 Create a game 时自动取消上一个"——判定标准跟 list_open_rooms
+    一致：还在进行中、还没人走过棋、棋钟没开始、而且这个用户正是已经认领的
+    那一方（另一方还空着，等对手）。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        record = session.execute(
+            select(GameRecord).where(
+                GameRecord.result == "ongoing",
+                GameRecord.move_count == 0,
+                GameRecord.clock_started.is_(False),
+                or_(GameRecord.black_player == username, GameRecord.white_player == username),
+                or_(GameRecord.black_player.is_(None), GameRecord.white_player.is_(None)),
+            )
+        ).scalars().first()
+        return record.game_id if record is not None else None
 
 
 def _game_summary(r: "GameRecord") -> dict:
@@ -508,6 +544,9 @@ def list_user_games(username: str, limit: int = 20, session_factory=None) -> lis
                 or_(GameRecord.black_player == username, GameRecord.white_player == username),
                 # 中途夭折的对局（一方还没走棋就离开）不计入个人对局历史
                 or_(GameRecord.end_reason.is_(None), GameRecord.end_reason != "aborted"),
+                # 双方还没真正下起来（0手或只走了1步）的对局也不值得留在历史里，
+                # 这只是"存在过"，不算一局有意义的对局
+                GameRecord.move_count >= 2,
             )
             .order_by(GameRecord.updated_at.desc())
             .limit(limit)
@@ -550,6 +589,12 @@ def search_games(
             GameRecord.result != "ongoing",
             # 中途夭折的对局不收录进对局库
             or_(GameRecord.end_reason.is_(None), GameRecord.end_reason != "aborted"),
+            # 双方还没真正下起来（0手或只走了1步）的对局不收录
+            GameRecord.move_count >= 2,
+            # 双方都是匿名（没有任何一方绑定账号）的对局也不收录——
+            # 对局库是给人查"某人下过的棋"用的，全匿名的对局既查不到人、
+            # 留着也没有参考价值
+            or_(GameRecord.black_player.isnot(None), GameRecord.white_player.isnot(None)),
         ]
 
         if player and opponent:
@@ -632,6 +677,7 @@ def list_open_rooms(limit: int = 20, session_factory=None) -> list[dict]:
                 "black_player": r.black_player,
                 "white_player": r.white_player,
                 "open_side": _open_side(r),
+                "was_random_side": r.was_random_side,
                 "rated": r.rated,
                 "time_control_minutes": r.time_control_minutes,
                 "time_control_increment": r.time_control_increment,
@@ -1596,6 +1642,71 @@ if __name__ == "__main__":
     paged = search_games(player="salvador", limit=1, session_factory=test_session_factory)
     assert len(paged["games"]) == 1
     assert paged["total"] == 2, "total应该是全部匹配数，不受limit影响"
+
+    # 14) was_random_side：大厅要能区分"随机分配"和"指定执黑/执白"
+    rand_game = Game()
+    save_game("rand_room", rand_game, black_player="RandomJoe", was_random_side=True,
+              session_factory=test_session_factory)
+    picked_game = Game()
+    save_game("picked_room", picked_game, black_player="PickyJane", was_random_side=False,
+              session_factory=test_session_factory)
+    rooms = list_open_rooms(limit=50, session_factory=test_session_factory)
+    rand_entry = next(r for r in rooms if r["game_id"] == "rand_room")
+    picked_entry = next(r for r in rooms if r["game_id"] == "picked_room")
+    assert rand_entry["was_random_side"] is True
+    assert picked_entry["was_random_side"] is False
+
+    # 15) find_pending_room_for_user：找到"这个用户名下还在等待的房间"
+    assert find_pending_room_for_user("RandomJoe", session_factory=test_session_factory) == "rand_room"
+    assert find_pending_room_for_user("NobodyHome", session_factory=test_session_factory) is None
+    # 对手也加入了（双方都填上）之后，就不再是"等待中"的房间
+    save_game("rand_room", rand_game, white_player="TheOpponent", session_factory=test_session_factory)
+    assert find_pending_room_for_user("RandomJoe", session_factory=test_session_factory) is None
+
+    # 16) Game History / Database 过滤：未走棋、只走1步、双方全匿名 都不收录
+    zero_move_game = Game()
+    save_game("zero_move", zero_move_game, black_player="Filterer", white_player="Opp1",
+              session_factory=test_session_factory)
+    # 手动把 move_count 改成 1（模拟"只走了一步"，不用真的走棋）
+    with test_session_factory() as _session:
+        _rec = _session.execute(
+            select(GameRecord).where(GameRecord.game_id == "zero_move")
+        ).scalar_one()
+        _rec.result = "black_wins"
+        _rec.move_count = 1
+        _session.commit()
+
+    two_move_game = Game()
+    two_move_game.resign(_Side.BLACK)
+    save_game("two_move", two_move_game, black_player="Filterer", white_player="Opp2",
+              session_factory=test_session_factory)
+    with test_session_factory() as _session:
+        _rec = _session.execute(
+            select(GameRecord).where(GameRecord.game_id == "two_move")
+        ).scalar_one()
+        _rec.move_count = 2
+        _session.commit()
+
+    anon_vs_anon = Game()
+    anon_vs_anon.resign(_Side.BLACK)
+    save_game("anon_vs_anon", anon_vs_anon, session_factory=test_session_factory)
+    with test_session_factory() as _session:
+        _rec = _session.execute(
+            select(GameRecord).where(GameRecord.game_id == "anon_vs_anon")
+        ).scalar_one()
+        _rec.move_count = 5
+        _session.commit()
+
+    history = list_user_games("Filterer", limit=50, session_factory=test_session_factory)
+    history_ids = {g["game_id"] for g in history}
+    assert "zero_move" not in history_ids, "只走1步的对局不应该出现在Game History里"
+    assert "two_move" in history_ids, "走了2步的对局应该正常出现"
+
+    db_results = search_games(session_factory=test_session_factory)
+    db_ids = {g["game_id"] for g in db_results["games"]}
+    assert "zero_move" not in db_ids, "只走1步的对局不应该出现在Database里"
+    assert "anon_vs_anon" not in db_ids, "双方都匿名的对局不应该出现在Database里"
+    assert "two_move" in db_ids, "正常对局应该照常出现"
 
     print("db.py 自检全部通过 ✅")
 
