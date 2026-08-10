@@ -44,6 +44,7 @@ import os
 from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect, Security
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
@@ -273,23 +274,39 @@ def get_game_or_404(game_id: str) -> Game:
     # 惰性超时检测：每次有人跟这局对局交互（不只是走棋），
     # 顺带看一眼当前行棋方是不是已经超时，超时就直接结束对局。
     if game.check_timeout():
-        persist(game_id, game)
+        # 这里直接用同步写库，没有走 persist()——因为 get_game_or_404 被十几个
+        # 接口调用，把它整个改成 async 会牵连过广、风险大于收益；而超时这件事
+        # 每局最多只发生一次，不在热路径上，偶尔阻塞一下可以接受。
+        if game_id not in EPHEMERAL_GAMES:
+            db.save_game(game_id, game)
         maybe_finalize_rating(game_id, game)
 
     return game
 
 
-def persist(
+async def persist(
     game_id: str,
     game: Game,
     black_player: str | None = None,
     white_player: str | None = None,
     rated: bool | None = None,
 ) -> None:
-    """把当前对局状态存入数据库（每次影响状态的操作后都应调用）"""
+    """
+    把当前对局状态存入数据库（每次影响状态的操作后都应调用）。
+
+    关键：db.save_game() 用的是**同步阻塞**的数据库驱动（psycopg2）。
+    如果直接在 async 接口里调用它，那次数据库往返期间会卡住整个事件循环——
+    不只是走这步棋的人在等，服务器上**所有人**的请求都会一起排队等它完成。
+    这正是"两人正常对弈时也会突然集体卡十几秒"的根源：只要某一次写库
+    因为任何原因慢了（网络抖动、Neon 端偶发延迟、连接重建），全服跟着冻住。
+
+    所以这里丢进线程池执行：这次写库慢的时候，只有发起它的这个请求在等，
+    其他人的请求照常被事件循环处理。
+    """
     if game_id in EPHEMERAL_GAMES:
         return  # single game：压根不落库，不计入大厅/历史/对局库
-    db.save_game(
+    await run_in_threadpool(
+        db.save_game,
         game_id, game,
         black_player=black_player, white_player=white_player, rated=rated,
     )
@@ -604,7 +621,7 @@ async def create_game(
             else:
                 claims["white"] = x_guest_id
 
-    persist(game_id, GAMES[game_id], black_player=black_slot, white_player=white_slot, rated=rated)
+    await persist(game_id, GAMES[game_id], black_player=black_slot, white_player=white_slot, rated=rated)
 
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
@@ -635,7 +652,7 @@ async def join_game(game_id: str, x_auth_token: str = Security(auth_scheme)):
     if players["black"] is not None and players["white"] is not None:
         start_game_if_needed(game)
 
-    persist(game_id, GAMES[game_id], black_player=players["black"], white_player=players["white"])
+    await persist(game_id, GAMES[game_id], black_player=players["black"], white_player=players["white"])
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
     return {**state, "my_side": resolve_my_side(game_id, username, None)}
@@ -669,7 +686,7 @@ async def start_game(
 
     started_now = start_game_if_needed(game)
     if started_now:
-        persist(game_id, game)
+        await persist(game_id, game)
     state = game_state(game_id, game)
     await manager.broadcast(game_id, state)
     return {**state, "my_side": resolve_my_side(game_id, username, x_guest_id)}
@@ -793,7 +810,7 @@ async def make_move(
 
     response = game_state(game_id, game)
     response["last_move"] = move_notation(record)
-    persist(game_id, game)
+    await persist(game_id, game)
     maybe_finalize_rating(game_id, game)
     await manager.broadcast(game_id, response)
     my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
@@ -813,7 +830,7 @@ async def undo_move(
         game.undo()
     except IllegalMoveError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    persist(game_id, game)
+    await persist(game_id, game)
     state = game_state(game_id, game)
     await manager.broadcast(game_id, state)
     my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
@@ -850,7 +867,7 @@ async def resign(
 
     side = Side.BLACK if side_key == "black" else Side.WHITE
     game.resign(side)
-    persist(game_id, game)
+    await persist(game_id, game)
     maybe_finalize_rating(game_id, game)
     state = game_state(game_id, game)
     await manager.broadcast(game_id, state)
@@ -964,7 +981,7 @@ async def respond_to_offer(
                 steps += 1
             if game.current_side.value != offer["from"] and len(game.move_log) > 0:
                 game.undo()
-        persist(game_id, game)
+        await persist(game_id, game)
         maybe_finalize_rating(game_id, game)
 
     state = game_state(game_id, game)

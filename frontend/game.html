@@ -642,6 +642,11 @@
   let anim = null;            // { fromSq, toSq, movingInfo, capturedInfo, startedAt }
   let animRaf = null;
   let prevBoardState = null;     // 上一帧的棋盘，用来对比出"这一步是谁走的、吃了什么"
+  // 乐观更新：点击后先在本地把这步棋走掉（立刻出画面和音效），
+  // 不等服务器往返。记下这步棋，等服务器的权威状态回来时用它做两件事：
+  //   1) 认出"这就是我刚才那一步"，避免动画和音效被重复播一遍
+  //   2) 万一服务器拒绝了，用快照把画面回滚回去
+  let optimisticMove = null;
   // 每格棋子当前用的是左版还是右版。走到正中 f 线时不翻面，
   // 需要靠这张表把"原来的朝向"带过去。
   let orientationBySquare = {};
@@ -1663,7 +1668,14 @@
     lastMoveTo = state.last_move_to || null;
     updateOrientations(state.board, lastMoveFrom, lastMoveTo);
 
-    const detected = (!replayOnly && previousBoard)
+    // 如果这次的服务器状态正是我刚才乐观走掉的那一步，说明画面早就更新过了，
+    // 不能再播一次动画和音效（否则会看到棋子"抖一下"、声音响两遍）
+    const echoesOptimistic = optimisticMove
+      && optimisticMove.from === lastMoveFrom
+      && optimisticMove.to === lastMoveTo;
+    if (echoesOptimistic) optimisticMove = null;
+
+    const detected = (!replayOnly && !echoesOptimistic && previousBoard)
       ? detectMove(previousBoard, boardState, lastMoveFrom, lastMoveTo)
       : null;
     prevBoardState = boardState;
@@ -1673,6 +1685,19 @@
       const movedSide = currentSide === "black" ? "white" : "black";
       const isMate = state.result !== "ongoing" && state.end_reason === "checkmate";
       startMoveAnimation(detected, movedSide, inCheck, isMate);
+    } else if (echoesOptimistic) {
+      // 这一步本地已经走过、动画多半还在播（服务器往往比0.4秒动画先回来）——
+      // 千万别把 anim 清掉，否则棋子会在半路上突然瞬移到终点。
+      // 将军/绝杀是本地判断不出来的，只能等服务器这份权威状态回来才补音效。
+      if (state.result !== "ongoing" && state.end_reason === "checkmate") {
+        playSound("checkmate");
+      } else if (inCheck) {
+        playSound("check");
+      }
+      if (!anim) { drawBoard(); renderCaptured(); }
+    } else if (anim && anim.toSq === lastMoveTo) {
+      // 同一步棋的状态会到达两次（自己走棋时，HTTP 响应和 WebSocket 广播各一次），
+      // 后到的那次不能把正在播的动画掐掉，否则棋子会半路瞬移
     } else {
       anim = null;
       drawBoard();
@@ -1752,14 +1777,83 @@
     setMessage(legalDestinations.length === 0 ? `${sq} 这个棋子当前没有合法走法（可能被将军钉住了）。` : "");
   }
 
+  /**
+   * 在本地立刻把这步棋走掉，不等服务器。
+   * 只处理最常见的"移动 + 吃子"，升变这种需要规则判定的交给服务器的权威状态去纠正——
+   * 反正服务器响应回来时会覆盖成正确的局面，这里只负责让画面第一时间动起来。
+   * @returns 回滚用的快照
+   */
+  function applyOptimisticMove(from, to) {
+    const snapshot = {
+      board: boardState,
+      currentSide,
+      lastMoveFrom,
+      lastMoveTo,
+      legalMovesMap,
+      historyLen: positionHistory.length,
+    };
+
+    const movingInfo = boardState[from];
+    if (!movingInfo) return snapshot;   // 理论上不会发生，保险起见
+
+    const capturedInfo = boardState[to] || null;
+    const nextBoard = { ...boardState };
+    delete nextBoard[from];
+    nextBoard[to] = movingInfo;
+
+    const movedSide = currentSide;
+    boardState = nextBoard;
+    currentSide = currentSide === "black" ? "white" : "black";
+    lastMoveFrom = from;
+    lastMoveTo = to;
+    legalMovesMap = {};        // 轮到对方了，我这边先没有可走的棋
+    selected = null;
+    legalDestinations = [];
+    optimisticMove = { from, to };
+
+    updateOrientations(nextBoard, from, to);
+    prevBoardState = nextBoard;
+
+    // 立刻播动画和音效——这一步是整个优化的重点：
+    // 玩家看到的反馈不再需要等一次跨国网络往返
+    const detected = { fromSq: from, toSq: to, movingInfo, capturedInfo };
+    startMoveAnimation(detected, movedSide, false, false);
+
+    return snapshot;
+  }
+
+  function rollbackOptimisticMove(snapshot) {
+    boardState = snapshot.board;
+    currentSide = snapshot.currentSide;
+    lastMoveFrom = snapshot.lastMoveFrom;
+    lastMoveTo = snapshot.lastMoveTo;
+    legalMovesMap = snapshot.legalMovesMap;
+    optimisticMove = null;
+    selected = null;
+    legalDestinations = [];
+    anim = null;
+    if (animRaf) { cancelAnimationFrame(animRaf); animRaf = null; }
+    positionHistory.length = snapshot.historyLen;
+    moveMeta.length = snapshot.historyLen;
+    prevBoardState = boardState;
+    updateOrientations(boardState, lastMoveFrom, lastMoveTo);
+    drawBoard();
+    renderCaptured();
+    renderHistory();
+    renderNavButtons();
+  }
+
   async function tryMove(from, to) {
+    // 先在本地把棋走掉，画面立刻响应；服务器只是"事后确认"
+    const snapshot = applyOptimisticMove(from, to);
     try {
       const state = await apiPost(`/games/${gameId}/move`, { from_sq: from, to_sq: to });
       handleIncomingState(state);
       setMessage(`${from} → ${to}：${state.last_move}`);
     } catch (err) {
+      // 服务器不认这步棋（非法走法、不是你的回合、对局已结束……）：把画面退回去
+      rollbackOptimisticMove(snapshot);
       setMessage(err.message);
-      selected = null; legalDestinations = []; drawBoard();
     }
   }
 
