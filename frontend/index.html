@@ -442,13 +442,13 @@
   <main class="content">
     <!-- 左列：Learn / Puzzle / Watch -->
     <section class="feature-column">
-      <div class="feature-card disabled" data-name="learn">
+      <a class="feature-card" data-name="learn" href="learn_lobby.html" style="text-decoration:none; color:inherit;">
         <span class="icon">🎓</span>
         <span>
           <span class="title">Learn</span><br>
           <span class="subtitle">learn how to play arkatana</span>
         </span>
-      </div>
+      </a>
       <div class="feature-card disabled" data-name="puzzle">
         <span class="icon">🧩</span>
         <span>
@@ -729,7 +729,7 @@
   // 未开放功能的占位提示（Learn / Puzzle / Watch / 好友对战 / AI / 侧边栏其他项）
   // -------------------------------------------------------------------
   document.querySelectorAll("[data-name]").forEach((el) => {
-    const enabledNow = ["play", "database"]; // 已经有实际功能的导航项
+    const enabledNow = ["play", "database", "learn"]; // 已经有实际功能的导航项
     const name = el.dataset.name;
     if (enabledNow.includes(name)) return;
     el.addEventListener("click", (e) => {

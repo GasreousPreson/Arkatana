@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learn · 古戰棋 Arkatana</title>
+<style>
+  :root {
+    --ink: #1b1b1e;
+    --ink-raised: #232327;
+    --parchment-light: #ede3c8;
+    --parchment-dark: #cbb98d;
+    --cinnabar: #a6362b;
+    --jade: #3f6656;
+    --gold: #b8944b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--ink);
+    color: var(--parchment-light);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  a { color: inherit; text-decoration: none; }
+
+  /* ---------------------------------------------------------------- */
+  /* 外壳：跟首页共用同一套（左侧导航 + 顶栏 + 内容区）                   */
+  /* ---------------------------------------------------------------- */
+  .app-shell {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    grid-template-rows: 56px 1fr;
+    min-height: 100vh;
+  }
+  .sidebar {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    background: var(--ink-raised);
+    border-right: 1px solid rgba(184, 148, 75, 0.25);
+    display: flex;
+    flex-direction: column;
+    padding: 16px 0;
+  }
+  .sidebar .brand {
+    padding: 0 16px 16px;
+    font-family: "SimSun", "Songti SC", Georgia, serif;
+    font-size: 15px;
+    letter-spacing: 0.08em;
+    border-bottom: 1px solid rgba(184, 148, 75, 0.2);
+    margin-bottom: 10px;
+  }
+  .nav-list { list-style: none; margin: 0; padding: 0; flex: 1; }
+  .nav-list li a {
+    display: block;
+    padding: 9px 16px;
+    font-size: 14px;
+    color: var(--parchment-light);
+    opacity: 0.85;
+    border-left: 3px solid transparent;
+  }
+  .nav-list li a:hover { background: rgba(184, 148, 75, 0.1); opacity: 1; }
+  .nav-list li a.active { border-left-color: var(--gold); color: var(--gold); opacity: 1; }
+
+  .topbar {
+    grid-column: 2;
+    grid-row: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    border-bottom: 1px solid rgba(184, 148, 75, 0.2);
+  }
+  .topbar .site-title {
+    font-family: "SimSun", "Songti SC", Georgia, serif;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    font-size: 20px;
+  }
+  .topbar .site-title .en { color: var(--gold); font-size: 14px; margin-left: 6px; }
+  #account-chip { font-size: 13px; color: var(--gold); }
+
+  .content {
+    grid-column: 2;
+    grid-row: 2;
+    padding: 28px 32px 60px;
+    overflow-y: auto;
+  }
+
+  h1.section-title {
+    font-size: 22px;
+    margin: 0 0 14px;
+    color: var(--parchment-light);
+  }
+  h1.section-title:not(:first-child) { margin-top: 32px; }
+
+  .lesson-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(280px, 460px));
+    gap: 14px;
+  }
+  .lesson-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 18px;
+    background: var(--ink-raised);
+    border: 1px solid rgba(184, 148, 75, 0.25);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .lesson-card:hover { background: #2b2b30; border-color: var(--gold); }
+  .lesson-card img { width: 48px; height: 48px; flex-shrink: 0; object-fit: contain; }
+  .lesson-card .title { font-size: 17px; color: var(--parchment-light); }
+  .lesson-card .subtitle { font-size: 13px; color: rgba(237,227,200,0.6); font-style: italic; margin-top: 2px; }
+
+  /* 已完成章节的卡片：轻微高亮，暗示"已经学过" */
+  .lesson-card.done { border-color: rgba(184, 148, 75, 0.5); }
+  .lesson-card.done .title::after {
+    content: " ✓";
+    color: #6fae6f;
+    font-style: normal;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* 手机端：汉堡菜单 + 抽屉 + 单列卡片                                  */
+  /* ---------------------------------------------------------------- */
+  .m-menu-btn { display: none; }
+  #m-drawer-backdrop { display: none; }
+  #m-drawer {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 220px;
+    background: var(--ink-raised);
+    border-right: 1px solid var(--gold);
+    z-index: 40;
+    padding: 60px 0 20px;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+  }
+  #m-drawer.open { transform: translateX(0); }
+  #m-drawer ul { list-style: none; margin: 0; padding: 0; }
+  #m-drawer li a { display: block; padding: 12px 20px; color: var(--parchment-light); font-size: 14px; }
+  #m-drawer li a:hover { background: rgba(184,148,75,0.12); }
+
+  @media (max-width: 760px) {
+    .sidebar { display: none; }
+    .app-shell { grid-template-columns: 1fr; }
+    .topbar, .content { grid-column: 1; }
+    .topbar { position: relative; padding-left: 52px; }
+    .topbar .site-title { font-size: 16px; }
+
+    .m-menu-btn {
+      display: block;
+      position: fixed;
+      left: 12px; top: 12px;
+      background: none; border: none;
+      color: var(--parchment-light);
+      font-size: 22px;
+      cursor: pointer;
+      z-index: 41;
+    }
+    #m-drawer, #m-drawer-backdrop { display: block; }
+    #m-drawer-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 39;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    #m-drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+
+    .content { padding: 18px 14px 50px; }
+    .lesson-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app-shell">
+  <nav class="sidebar">
+    <div class="brand">古戰棋<br>Arkatana</div>
+    <ul class="nav-list">
+      <li><a href="index.html">play</a></li>
+      <li><a href="learn_lobby.html" class="active">learn</a></li>
+      <li><a href="#">studies</a></li>
+      <li><a href="#">openings</a></li>
+      <li><a href="database.html">database</a></li>
+      <li><a href="#">import game</a></li>
+      <li><a href="#">community</a></li>
+      <li><a href="#">friends</a></li>
+    </ul>
+  </nav>
+
+  <button class="m-menu-btn" id="btn-mobile-menu" title="菜单">☰</button>
+  <div id="m-drawer-backdrop"></div>
+  <nav id="m-drawer">
+    <ul>
+      <li><a href="index.html">play</a></li>
+      <li><a href="learn_lobby.html">learn</a></li>
+      <li><a href="#">studies</a></li>
+      <li><a href="#">openings</a></li>
+      <li><a href="database.html">database</a></li>
+      <li><a href="#">import game</a></li>
+      <li><a href="#">community</a></li>
+      <li><a href="#">friends</a></li>
+    </ul>
+  </nav>
+
+  <header class="topbar">
+    <div class="site-title">古 戰 棋 <span class="en">ARKATANA</span></div>
+    <span id="account-chip">未登录</span>
+  </header>
+
+  <main class="content">
+    <h1 class="section-title">Fundamentals</h1>
+    <div class="lesson-grid" id="fundamentals-grid"></div>
+
+    <h1 class="section-title">Pieces and Moves</h1>
+    <div class="lesson-grid" id="pieces-grid"></div>
+  </main>
+</div>
+
+<script src="learn-data.js"></script>
+<script>
+(() => {
+  "use strict";
+
+  // 手机端汉堡抽屉
+  const drawerEl = document.getElementById("m-drawer");
+  const backdropEl = document.getElementById("m-drawer-backdrop");
+  document.getElementById("btn-mobile-menu").addEventListener("click", () => {
+    drawerEl.classList.add("open");
+    backdropEl.classList.add("open");
+  });
+  backdropEl.addEventListener("click", () => {
+    drawerEl.classList.remove("open");
+    backdropEl.classList.remove("open");
+  });
+
+  // 账号状态（跟首页一致的简单展示，不提供登录入口——登录在首页做）
+  const authUsername = localStorage.getItem("arkatana_username");
+  document.getElementById("account-chip").textContent = authUsername || "未登录";
+
+  // 每个章节已完成到第几关，存在 localStorage 里（纯前端的学习进度，
+  // 不涉及账号/服务器——教程练习本来就不需要跨设备同步这种复杂度）
+  function getProgress(chapterId) {
+    const raw = localStorage.getItem(`arkatana_learn_${chapterId}`);
+    return raw ? parseInt(raw, 10) : 0;
+  }
+
+  function renderCard(chapter) {
+    const progress = getProgress(chapter.id);
+    const isDone = progress >= chapter.levelCount;
+    const card = document.createElement("div");
+    card.className = "lesson-card" + (isDone ? " done" : "");
+    card.innerHTML = `
+      <img src="pieces/${chapter.icon}" alt="">
+      <div>
+        <div class="title">${chapter.title}</div>
+        <div class="subtitle">${chapter.subtitle}</div>
+      </div>
+    `;
+    card.addEventListener("click", () => {
+      window.location.href = `learn.html?chapter=${chapter.id}`;
+    });
+    return card;
+  }
+
+  const fundamentalsGrid = document.getElementById("fundamentals-grid");
+  const piecesGrid = document.getElementById("pieces-grid");
+
+  window.LEARN_CHAPTERS.forEach((chapter) => {
+    const target = chapter.section === "fundamentals" ? fundamentalsGrid : piecesGrid;
+    target.appendChild(renderCard(chapter));
+  });
+})();
+</script>
+
+</body>
+</html>

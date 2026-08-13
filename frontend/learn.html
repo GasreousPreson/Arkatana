@@ -1,0 +1,886 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learn · 古戰棋 Arkatana</title>
+<style>
+  :root {
+    --ink: #1b1b1e;
+    --ink-raised: #232327;
+    --parchment-light: #e6e4de;
+    --parchment-dark: #c2bdb2;
+    --cinnabar: #a6362b;
+    --jade: #3f6656;
+    --gold: #b8944b;
+    --gold-bright: #d9a441;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--ink);
+    color: var(--parchment-light);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  a { color: inherit; }
+  button { font-family: inherit; cursor: pointer; }
+
+  #btn-back {
+    position: fixed;
+    top: 14px; left: 14px;
+    z-index: 30;
+    background: var(--ink-raised);
+    border: 1px solid var(--gold);
+    color: var(--parchment-light);
+    border-radius: 4px;
+    width: 36px; height: 36px;
+    font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #btn-back:hover { background: rgba(184,148,75,0.2); }
+
+  .layout {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 28px;
+    padding: 60px 20px 40px;
+    flex-wrap: wrap;
+  }
+
+  #board-wrap {
+    position: relative;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas#board {
+    background: var(--parchment-light);
+    max-width: 100%;
+    height: auto;
+    cursor: pointer;
+    touch-action: manipulation;
+    user-select: none;
+  }
+
+  .side-panel {
+    width: 340px;
+    flex-shrink: 0;
+  }
+  .info-card {
+    border: 1px solid var(--gold);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .info-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: var(--gold);
+    color: var(--ink);
+  }
+  .info-header img { width: 34px; height: 34px; object-fit: contain; }
+  .info-header .name { font-family: "SimSun","Songti SC",Georgia,serif; font-size: 21px; letter-spacing: 0.04em; }
+
+  .info-body {
+    padding: 14px 16px;
+    background: var(--ink-raised);
+    font-size: 14.5px;
+    line-height: 1.65;
+    white-space: pre-line;
+    min-height: 70px;
+    transition: background 0.25s ease;
+  }
+  .info-body.success { background: var(--gold); color: var(--ink); }
+  .info-body .feedback-text {
+    font-size: 22px;
+    font-style: italic;
+    text-align: center;
+    display: block;
+  }
+  .info-body .wrong-label { color: var(--cinnabar); font-weight: 700; }
+  .info-body .almost { color: rgba(230,228,222,0.7); }
+  .info-body.success .almost { color: rgba(27,27,30,0.65); }
+  .info-body a.retry {
+    color: #4c8c4c;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .level-row {
+    display: flex;
+  }
+  .level-box {
+    flex: 1;
+    text-align: center;
+    padding: 10px 0;
+    font-size: 16px;
+    background: #303035;
+    color: #6c6c72;
+    cursor: default;
+  }
+  .level-box + .level-box { border-left: 1px solid rgba(0,0,0,0.3); }
+  .level-box.current { background: var(--gold); color: #fff; font-weight: 700; }
+  .level-box.done { background: var(--gold); color: #fff; }
+  .level-box.current, .level-box.done { cursor: pointer; }
+  .level-box.current:hover, .level-box.done:hover { filter: brightness(1.15); }
+  .level-box.viewing { box-shadow: inset 0 -3px 0 #fff; }
+
+  /* ---------------------------------------------------------------- */
+  /* 手机端：棋盘全宽在上，信息卡在下                                    */
+  /* ---------------------------------------------------------------- */
+  @media (max-width: 760px) {
+    .layout { flex-direction: column; align-items: center; padding: 56px 8px 30px; gap: 14px; }
+    .side-panel { width: 100%; max-width: 520px; }
+    #btn-back { top: 10px; left: 10px; }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* 章节完成弹窗                                                       */
+  /* ---------------------------------------------------------------- */
+  #chapter-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.35);
+    z-index: 50;
+    align-items: center;
+    justify-content: center;
+  }
+  #chapter-overlay.open { display: flex; }
+  #chapter-modal {
+    position: relative;
+    background: var(--ink-raised);
+    border: 1px solid var(--gold);
+    border-radius: 6px;
+    padding: 28px 32px;
+    text-align: center;
+    min-width: 260px;
+  }
+  #chapter-modal .close-x {
+    position: absolute; top: 8px; right: 10px;
+    background: none; border: none; color: var(--parchment-light);
+    font-size: 18px; opacity: 0.7;
+  }
+  #chapter-modal .close-x:hover { opacity: 1; }
+  #chapter-modal .headline {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--gold-bright);
+    margin-bottom: 22px;
+  }
+  #chapter-modal .modal-actions { display: flex; flex-direction: column; gap: 10px; }
+  #chapter-modal button {
+    padding: 10px 20px;
+    border-radius: 4px;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  #btn-next-chapter { background: #9ccf5a; color: #1b1b1e; }
+  #btn-back-menu { background: var(--cinnabar); color: #fff; }
+</style>
+</head>
+<body>
+
+<button id="btn-back" title="返回">←</button>
+
+<div class="layout">
+  <div id="board-wrap">
+    <canvas id="board" width="726" height="792"></canvas>
+  </div>
+
+  <div class="side-panel">
+    <div class="info-card">
+      <div class="info-header">
+        <img id="info-icon" src="" alt="">
+        <span class="name" id="info-title">Introduction</span>
+      </div>
+      <div class="info-body" id="info-body"></div>
+      <div class="level-row" id="level-row"></div>
+    </div>
+  </div>
+</div>
+
+<div id="chapter-overlay">
+  <div id="chapter-modal">
+    <button class="close-x" id="btn-close-chapter">✕</button>
+    <div class="headline" id="chapter-headline">Completed!</div>
+    <div class="modal-actions">
+      <button id="btn-next-chapter">Next: --</button>
+      <button id="btn-back-menu">back to menu</button>
+    </div>
+  </div>
+</div>
+
+<script src="pieces.js"></script>
+<script src="learn-engine.js"></script>
+<script src="learn-data.js"></script>
+<script src="learn-lessons.js"></script>
+<script>
+(() => {
+  "use strict";
+
+  const COLS = "abcdefghjkl";
+  const MIN_ROW = 1, MAX_ROW = 12;
+  const CELL = 66;
+
+  // -------------------------------------------------------------------
+  // 音效
+  // -------------------------------------------------------------------
+  const SOUNDS = {
+    move: new Audio("sounds/move.mp3"),
+    capture: new Audio("sounds/capture_2.mp3"),
+    star: new Audio("sounds/star.mp3"),
+    checkmate: new Audio("sounds/checkmate.mp3"),
+    chapterDone: new Audio("sounds/strings.mp3"),
+  };
+  Object.values(SOUNDS).forEach((a) => { a.preload = "auto"; a.volume = 0.85; });
+
+  let audioUnlocked = false;
+  function unlockAudio() {
+    if (audioUnlocked) return;
+    audioUnlocked = true;
+    Object.values(SOUNDS).forEach((a) => {
+      const p = a.play();
+      if (p && p.then) p.then(() => { a.pause(); a.currentTime = 0; }).catch(() => {});
+    });
+  }
+  document.addEventListener("pointerdown", unlockAudio, { once: true });
+  document.addEventListener("keydown", unlockAudio, { once: true });
+
+  function playSound(key) {
+    const base = SOUNDS[key];
+    if (!base) return;
+    const clip = base.cloneNode();   // 克隆播放，避免连续走棋时互相打断
+    clip.volume = base.volume;
+    const p = clip.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+
+  const canvas = document.getElementById("board");
+  const ctx = canvas.getContext("2d");
+
+  const COLORS = {
+    parchLight: "#e6e4de",
+    parchDark: "#c2bdb2",
+    gold: "#e0a92a",
+    hint: "rgba(228, 166, 103, 0.6)",
+    star: "#f2c230",
+  };
+  // 提示箭头/走法提示格/错误标记 —— 都是"深蓝紫色"系，按规格调透明度
+  const PURPLE = "76, 78, 162";      // 深蓝紫色 RGB（从参考图 arrow.png 实测取样）
+  const RED = "196, 45, 45";
+
+  // -------------------------------------------------------------------
+  // URL 参数 & 关卡数据
+  // -------------------------------------------------------------------
+  const params = new URLSearchParams(window.location.search);
+  const chapterId = params.get("chapter") || "fundamentals";
+  const chapterMeta = window.LEARN_CHAPTERS.find((c) => c.id === chapterId);
+  const lessons = (window.LEARN_LESSONS && window.LEARN_LESSONS[chapterId]) || [];
+
+  function progressKey(id) { return `arkatana_learn_${id}`; }
+  function getProgress(id) {
+    const raw = localStorage.getItem(progressKey(id));
+    return raw ? parseInt(raw, 10) : 0;
+  }
+  function setProgress(id, n) {
+    const cur = getProgress(id);
+    if (n > cur) localStorage.setItem(progressKey(id), String(n));
+  }
+
+  let levelIndex = Math.max(0, (parseInt(params.get("level"), 10) || 1) - 1);
+  if (levelIndex >= lessons.length) levelIndex = 0;
+
+  // -------------------------------------------------------------------
+  // 局面状态（会在每次进入/重试一关时重置）
+  // -------------------------------------------------------------------
+  let board = {};          // {sq: {notation, side, promoted}}
+  let stars = [];          // 还剩下的星星坐标
+  let greens = [];         // 还剩下的绿格坐标
+  let movablePiece = null; // 单一可动棋子的当前坐标（null 表示"任意己方棋子都能动"这一关）
+  let movableSide = "black";
+  let selected = null;
+  let hasEverSelected = false;   // 提示箭头/说明格只在"从没点过棋子"时显示
+  let legalDests = [];     // 当前选中棋子的合法目标格（走法引擎算出来的）
+  let hintArrows = [];
+  let wrongHintArrows = [];   // {from, to} 关卡自带的"这样走是错的"红色箭头+🚫提示，跟 hintArrows 同生命周期
+  let moveCount = 0;
+  let lastWrongFlash = null;   // {from, to} 短暂显示红色箭头+🚫用
+  let solved = false;
+  let checkedThroneSquare = null;   // check_throne 目标达成时被将军的王城坐标
+  let lesson = null;
+
+  const FEEDBACK_WORDS = ["Marvelous!", "Nailed it!", "Nice one!", "Great job!", "Right on!"];
+
+  function loadLesson(idx) {
+    lesson = lessons[idx];
+    if (!lesson) return;
+    board = {};
+    for (const sq in lesson.board) board[sq] = Object.assign({}, lesson.board[sq]);
+    stars = Object.keys(lesson.board).filter((sq) => lesson.board[sq].notation === "STAR");
+    greens = (lesson.greenSquares || []).slice();
+    movablePiece = lesson.movablePiece || null;
+    movableSide = lesson.movableSide || "black";
+    hintArrows = (lesson.hintArrows || []).slice();
+    wrongHintArrows = (lesson.wrongHintArrows || []).slice();
+    selected = null;
+    legalDests = [];
+    moveCount = 0;
+    lastWrongFlash = null;
+    solved = false;
+    hasEverSelected = false;
+    checkedThroneSquare = null;
+    orientationBySquare = {};   // 棋子朝向记忆也要跟着这一关重置，不然会继承上一关的朝向
+
+    document.getElementById("info-icon").src = "pieces/" + chapterMeta.icon;
+    document.getElementById("info-title").textContent = lesson.title || chapterMeta.title;
+    renderInfoBody(lesson.description, false);
+    renderLevelRow();
+    drawBoard();
+  }
+
+  // -------------------------------------------------------------------
+  // 棋盘绘制
+  // -------------------------------------------------------------------
+  function colIndex(letter) { return COLS.indexOf(letter); }
+  function squareTopLeft(col, row) {
+    const displayRowIndex = MAX_ROW - row;
+    return [col * CELL, displayRowIndex * CELL];
+  }
+  function squareToPixelCenter(sq) {
+    const col = colIndex(sq[0]);
+    const row = parseInt(sq.slice(1), 10);
+    const [x, y] = squareTopLeft(col, row);
+    return [x + CELL / 2, y + CELL / 2];
+  }
+  function pixelToSquare(px, py) {
+    const col = Math.floor(px / CELL);
+    const displayRowIndex = Math.floor(py / CELL);
+    const row = MAX_ROW - displayRowIndex;
+    if (col < 0 || col >= COLS.length || row < MIN_ROW || row > MAX_ROW) return null;
+    return COLS[col] + row;
+  }
+
+  function fillSquare(sq, color) {
+    const [cx, cy] = squareToPixelCenter(sq);
+    ctx.fillStyle = color;
+    ctx.fillRect(cx - CELL / 2, cy - CELL / 2, CELL, CELL);
+  }
+
+  function drawArrow(fromSq, toSq, color, shaftWidth) {
+    const [x1, y1] = squareToPixelCenter(fromSq);
+    const [x2, y2] = squareToPixelCenter(toSq);
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const rawLen = Math.hypot(x2 - x1, y2 - y1);
+
+    // 箭头不顶到格子中心，稍微收一点，视觉上更像"指向"而不是"穿过"——
+    // 但收缩量必须跟着箭头总长按比例走，不能是固定像素值：固定值在1格短
+    // 箭头上会把可用长度啃掉大半，导致箭身长度被挤成0（只剩一个三角形，
+    // 这正是之前那个bug的原因）。
+    const shrink = Math.min(CELL * 0.28, rawLen * 0.18);
+    const sx = x1 + Math.cos(angle) * shrink, sy = y1 + Math.sin(angle) * shrink;
+    const ex = x2 - Math.cos(angle) * shrink, ey = y2 - Math.sin(angle) * shrink;
+
+    // 比例是从参考图 arrow.png 实测出来的：箭头宽度≈27px、箭身粗细≈6px，
+    // 箭身只有箭头宽度的约22%。但同样的道理，箭头长度不能是固定值——
+    // 短箭头必须按总长打折，保证箭身至少留出40%的长度，不会被吃掉。
+    const width = shaftWidth || Math.max(10, CELL * 0.16);
+    const totalLen = Math.hypot(ex - sx, ey - sy);
+    const headWidth = Math.min(width * 3.6, totalLen * 0.6);
+    const headLen = headWidth;
+
+    const shaftLen = Math.max(0, totalLen - headLen);
+    const ux = Math.cos(angle), uy = Math.sin(angle);
+    const nx = -uy, ny = ux;   // 垂直于箭身方向的法向量，用来画箭身两侧和箭头两翼
+
+    const shaftEndX = sx + ux * shaftLen, shaftEndY = sy + uy * shaftLen;
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    // 箭身（矩形）
+    ctx.moveTo(sx + nx * width / 2, sy + ny * width / 2);
+    ctx.lineTo(shaftEndX + nx * width / 2, shaftEndY + ny * width / 2);
+    ctx.lineTo(shaftEndX - nx * width / 2, shaftEndY - ny * width / 2);
+    ctx.lineTo(sx - nx * width / 2, sy - ny * width / 2);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    // 箭头（三角形），比箭身宽得多，符合参考图比例
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(shaftEndX + nx * headWidth / 2, shaftEndY + ny * headWidth / 2);
+    ctx.lineTo(shaftEndX - nx * headWidth / 2, shaftEndY - ny * headWidth / 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawBoard() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 棋盘格
+    for (let row = MIN_ROW; row <= MAX_ROW; row++) {
+      for (let col = 0; col < COLS.length; col++) {
+        const [x, y] = squareTopLeft(col, row);
+        const isLight = (col + row) % 2 === 0;
+        ctx.fillStyle = isLight ? COLORS.parchLight : COLORS.parchDark;
+        ctx.fillRect(x, y, CELL, CELL);
+      }
+    }
+
+    // 坐标标签
+    ctx.fillStyle = "rgba(60,52,36,0.55)";
+    ctx.font = "bold 11px Consolas, monospace";
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    for (let row = MIN_ROW; row <= MAX_ROW; row++) {
+      const [x, y] = squareTopLeft(0, row);
+      ctx.fillText(String(row), x + 3, y + 3);
+    }
+    ctx.textAlign = "right";
+    for (let col = 0; col < COLS.length; col++) {
+      const [x, y] = squareTopLeft(col, MIN_ROW);
+      ctx.fillText(COLS[col], x + CELL - 3, y + 3);
+    }
+
+    // 绿格（目标格，67%透明度绿色）
+    if (lesson.promotionHighlightRows) {
+      for (const row of lesson.promotionHighlightRows) {
+        for (let c = 0; c < COLS.length; c++) fillSquare(COLS[c] + row, "rgba(64, 200, 200, 0.5)");
+      }
+    }
+
+    greens.forEach((sq) => fillSquare(sq, "rgba(60, 179, 113, 0.67)"));
+
+    // 走法说明格（深蓝紫/深红/绿，60%透明度）——这是部分关卡专属的静态教学
+    // 提示（比如 Knight_3、Pawn_5，用来提前画出"这颗棋子能走哪几格"），
+    // 不是点击棋子后才出现的东西，跟提示箭头一样，玩家点了目标棋子就消失。
+    if (!hasEverSelected && lesson.moveHintSquares) {
+      const HINT_COLORS = {
+        purple: `rgba(${PURPLE}, 0.6)`,
+        red: `rgba(${RED}, 0.6)`,
+        green: "rgba(60, 179, 113, 0.6)",
+      };
+      lesson.moveHintSquares.forEach(({ sq, color }) => {
+        fillSquare(sq, HINT_COLORS[color] || HINT_COLORS.purple);
+      });
+    }
+
+    // 选中棋子：淡淡描一下选中格，真正的走法提示是下面的橙色圆点
+    if (selected) {
+      fillSquare(selected, `rgba(${PURPLE}, 0.3)`);
+    }
+
+    if (checkedThroneSquare) {
+      const [cx, cy] = squareToPixelCenter(checkedThroneSquare);
+      const grad = ctx.createRadialGradient(cx, cy, CELL * 0.1, cx, cy, CELL * 0.75);
+      grad.addColorStop(0, "rgba(196, 45, 45, 0.75)");
+      grad.addColorStop(1, "rgba(196, 45, 45, 0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(cx - CELL, cy - CELL, CELL * 2, CELL * 2);
+    }
+
+    // 棋子 + 星星
+    for (const sq in board) {
+      const info = board[sq];
+      if (info.notation === "STAR") {
+        drawStar(sq);
+      } else {
+        drawPiece(sq, info);
+      }
+    }
+
+    // 玩家点了棋子之后，真正的走法提示：橙色圆点，画在棋子上层，
+    // 吃子目标画成空心圆环（更醒目，暗示"这里有子可吃"）
+    if (selected) {
+      legalDests.forEach((d) => {
+        const [cx, cy] = squareToPixelCenter(d);
+        const isCapture = board[d] !== undefined;
+        if (isCapture) {
+          ctx.beginPath();
+          ctx.arc(cx, cy, CELL * 0.38, 0, Math.PI * 2);
+          ctx.lineWidth = 5;
+          ctx.strokeStyle = "rgba(224, 140, 40, 0.85)";
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = "rgba(224, 140, 40, 0.85)";
+          ctx.beginPath();
+          ctx.arc(cx, cy, CELL * 0.14, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      });
+    }
+
+    // 提示箭头（67%透明度深蓝紫）——玩家点过一次棋子后永久消失，
+    // 除非 retry / 回溯重新加载这一关
+    if (!hasEverSelected) {
+      hintArrows.forEach((a) => drawArrow(a.from, a.to, `rgba(${PURPLE}, 0.67)`));
+      // 关卡自带的"这样走是错的"红色箭头+🚫（比如 Ballista 第3关的 f10→h8），
+      // 跟蓝紫色引导箭头同一个生命周期——点过棋子就永久消失
+      wrongHintArrows.forEach((a) => drawProhibitedArrow(a.from, a.to));
+    }
+
+    // 错误提示：红色箭头 + 🚫（67%透明度），点棋子后自动消失（由 selected 控制）
+    // 跟上面的 wrongHintArrows 用的是同一套画法，玩家实际走错一步时触发
+    if (lastWrongFlash && !selected) {
+      drawProhibitedArrow(lastWrongFlash.from, lastWrongFlash.to);
+    }
+  }
+
+  // 红色箭头 + 🚫 禁止标记：关卡自带的静态"陷阱提示"（wrongHintArrows）和
+  // 玩家实际走错一步时的即时反馈（lastWrongFlash）共用这一套画法。
+  function drawProhibitedArrow(fromSq, toSq) {
+    drawArrow(fromSq, toSq, `rgba(${RED}, 0.67)`);
+    const [cx, cy] = squareToPixelCenter(toSq);
+    ctx.beginPath();
+    ctx.arc(cx, cy, CELL * 0.32, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${RED}, 0.67)`;
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - CELL * 0.22, cy - CELL * 0.22);
+    ctx.lineTo(cx + CELL * 0.22, cy + CELL * 0.22);
+    ctx.stroke();
+  }
+
+  function drawStar(sq) {
+    const [cx, cy] = squareToPixelCenter(sq);
+    const img = window.__starImg;
+    const size = CELL * 0.72;
+    if (img && img.complete) {
+      ctx.drawImage(img, cx - size / 2, cy - size / 2, size, size);
+    }
+  }
+
+  const pendingPieceLoads = new Set();   // 正在按需单独补加载的素材路径，防止重复请求
+  const fallbackImgCache = {};           // 按需补加载成功的素材，本地存一份（ArkatanaPieces 的缓存是私有的，写不进去）
+
+  function drawPiece(sq, info) {
+    const [cx, cy] = squareToPixelCenter(sq);
+    const P = window.ArkatanaPieces;
+    const path = P ? P.pieceImagePath(info.notation, info.side, sq, false, orientationBySquare[sq], info.promoted) : null;
+    const img = path ? (fallbackImgCache[path] || P.getImage(info.notation, info.side, sq, false, orientationBySquare[sq], info.promoted)) : null;
+    if (img) {
+      const size = CELL * (P ? P.pieceScale(info.notation) : 0.9);
+      ctx.drawImage(img, cx - size / 2, cy - size / 2, size, size);
+      return;
+    }
+    // 素材还没进 ArkatanaPieces 的缓存——正常只会发生在页面刚打开、
+    // preloadAll() 那一整批预加载还没跑完的窗口期（比如玩家进关卡后立刻点了
+    // 棋子，触发的这次 drawBoard() 抢在预加载完成之前执行）。这个格子这一帧
+    // 会先空着，但不能就此放弃——单独把这一张素材补加载一次，存进本地缓存，
+    // 加载完立刻重画整个棋盘，不用等那一整批全部加载完（batch 里排在后面的
+    // 素材可能还要等好一会）。这就是"第一次进关卡点棋子棋子会短暂消失，
+    // 重进/重试就不再出现"的根因：重进时 ArkatanaPieces 的缓存早就热了。
+    if (!path || pendingPieceLoads.has(path)) return;
+    pendingPieceLoads.add(path);
+    const onDemandImg = new Image();
+    onDemandImg.onload = () => { fallbackImgCache[path] = onDemandImg; pendingPieceLoads.delete(path); drawBoard(); };
+    onDemandImg.onerror = () => { pendingPieceLoads.delete(path); };
+    onDemandImg.src = path;
+  }
+
+  // 棋子朝向记忆（跟正式对局页一样：走到中线不突兀翻面）
+  let orientationBySquare = {};
+  function updateOrientations() {
+    const P = window.ArkatanaPieces;
+    if (!P) return;
+    const next = {};
+    for (const sq in board) {
+      next[sq] = P.resolveVariant(sq, false, orientationBySquare[sq]);
+    }
+    orientationBySquare = next;
+  }
+
+  // -------------------------------------------------------------------
+  // 交互：点击棋盘
+  // -------------------------------------------------------------------
+  function canSelect(sq) {
+    const info = board[sq];
+    if (!info || info.notation === "STAR") return false;
+    if (info.side !== movableSide) return false;
+    if (movablePiece !== null) return sq === movablePiece;
+    return true;   // any_move 关卡：己方任意棋子都能选
+  }
+
+  function computeLegalDests(sq) {
+    const info = board[sq];
+    const forward = info.side === "black" ? 1 : -1;
+    // hasMoved 必须是"这颗棋子自己有没有走过"，不能用全局步数——
+    // 否则像 Pawn 第2关那样有两颗兵的关卡，动了其中一颗，
+    // 另一颗的双步特权会被误删掉。
+    const hasMoved = !!info.hasMoved;
+    const r = window.LearnEngine.legalMoves(board, sq, info.notation, info.side, !!info.promoted, forward, hasMoved);
+    return r.moves.concat(r.captures);
+  }
+
+  canvas.addEventListener("click", (evt) => {
+    if (solved) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+    const px = (evt.clientX - rect.left) * scaleX;
+    const py = (evt.clientY - rect.top) * scaleY;
+    const sq = pixelToSquare(px, py);
+    if (!sq) return;
+
+    lastWrongFlash = null;
+
+    if (selected && legalDests.includes(sq)) {
+      makeMove(selected, sq);
+      return;
+    }
+
+    if (canSelect(sq)) {
+      selected = sq;
+      hasEverSelected = true;
+      legalDests = computeLegalDests(sq);
+      drawBoard();
+    } else {
+      selected = null;
+      legalDests = [];
+      drawBoard();
+    }
+  });
+
+  function makeMove(from, to) {
+    const mover = board[from];
+    const capturedInfo = board[to];
+    delete board[from];
+    board[to] = mover;
+    mover.hasMoved = true;   // 这颗棋子自己走过了（双步/首步特权判定要用）
+    moveCount += 1;
+
+    // 星星/绿格 清除
+    if (capturedInfo && capturedInfo.notation === "STAR") {
+      stars = stars.filter((s) => s !== to);
+    }
+    greens = greens.filter((g) => g !== to);
+
+    if (movablePiece !== null) movablePiece = to;
+
+    // 自动升变：规则跟正式对局完全一致
+    //   兵      —— 黑方到第8排 / 白方到第5排（是精确的单一排，不是一整片区域）
+    //   炮塔/剑士/战车 —— 黑方进入7~12排 / 白方进入1~6排
+    const destRow = parseInt(to.slice(1), 10);
+    const isBlackSide = mover.side === "black";
+    if (!mover.promoted) {
+      if (mover.notation === "") {
+        if (destRow === (isBlackSide ? 8 : 5)) mover.promoted = true;
+      } else if (["T", "S", "C"].includes(mover.notation)) {
+        const inZone = isBlackSide ? (destRow >= 7 && destRow <= 12) : (destRow >= 1 && destRow <= 6);
+        if (inZone) mover.promoted = true;
+      }
+    }
+    updateOrientations();
+
+    // 自定义错误走法检测（每一关自己的特殊规则，比如"必须先吃e3再吃f6"）
+    if (lesson.wrongMoveCheck) {
+      const wrongMsg = lesson.wrongMoveCheck({ from, to, moveCount, board, stars, greens });
+      if (wrongMsg) {
+        selected = null; legalDests = [];
+        drawBoard();
+        showWrongMove(from, to);
+        return;
+      }
+    }
+
+    // 移动动画：learn 模块的棋盘比较小巧，直接用瞬间落子，
+    // 保持练习时"点了就动"的流畅手感，不刻意做0.4秒滑动
+    if (movablePiece !== null && board[movablePiece]) {
+      // 单一可动棋子的关卡：走完这一步，自动把它在新位置的走法重新显示出来，
+      // 不需要玩家再点一次棋子才能看到下一步能走哪——这是要求里特别强调的
+      // "保证玩家每次走棋后不用再次点击棋子来走棋"。
+      selected = movablePiece;
+      legalDests = computeLegalDests(movablePiece);
+    } else {
+      selected = null;
+      legalDests = [];
+    }
+    drawBoard();
+
+    const goalMet = checkGoalMet();
+
+    // 音效优先级：将死 > 吃星星 > 吃普通棋子 > 普通移动——
+    // 跟正式对局界面（game.html）用的是同一套优先级逻辑
+    const isThroneGoal = lesson.goal && (lesson.goal.type === "destroy_throne" || lesson.goal.type === "check_throne");
+    if (goalMet && isThroneGoal) {
+      playSound("checkmate");
+    } else if (capturedInfo && capturedInfo.notation === "STAR") {
+      playSound("star");
+    } else if (capturedInfo) {
+      playSound("capture");
+    } else {
+      playSound("move");
+    }
+
+    if (goalMet) {
+      selected = null; legalDests = [];
+      drawBoard();
+      handleSuccess();
+    }
+  }
+
+  function checkGoalMet() {
+    const g = lesson.goal;
+    if (!g) return false;
+    if (g.type === "any_move") return moveCount >= 1;
+    if (g.type === "reach_square") return movablePiece === g.to;
+    if (g.type === "capture_all_stars") return stars.length === 0;
+    if (g.type === "reach_all_green") return greens.length === 0;
+    if (g.type === "capture_all_white") {
+      return !Object.values(board).some((p) => p.side === "white" && p.notation !== "STAR");
+    }
+    if (g.type === "destroy_throne") {
+      return !Object.values(board).some((p) => p.notation === "TH" && p.side !== movableSide);
+    }
+    if (g.type === "check_throne") {
+      if (movablePiece === null) return false;
+      const info = board[movablePiece];
+      const forward = info.side === "black" ? 1 : -1;
+      const r = window.LearnEngine.legalMoves(board, movablePiece, info.notation, info.side, !!info.promoted, forward, !!info.hasMoved);
+      const throneSq = Object.keys(board).find((sq) => board[sq].notation === "TH" && board[sq].side !== movableSide);
+      const isChecked = throneSq && r.captures.includes(throneSq);
+      if (isChecked) checkedThroneSquare = throneSq;
+      return isChecked;
+    }
+    if (g.type === "capture_target") {
+      return !board[g.target] || board[g.target].side === movableSide;
+    }
+    return false;
+  }
+
+  function showWrongMove(from, to) {
+    lastWrongFlash = { from, to };
+    drawBoard();
+    renderInfoBody(null, false, true);
+  }
+
+  // -------------------------------------------------------------------
+  // 过关 / 失败 反馈
+  // -------------------------------------------------------------------
+  function renderInfoBody(text, success, wrong) {
+    const el = document.getElementById("info-body");
+    el.classList.toggle("success", !!success);
+    if (wrong) {
+      el.innerHTML = `<span class="wrong-label">Wrong move</span><br><span class="almost">you're almost there</span><br><a class="retry" id="btn-retry">Retry</a>`;
+      document.getElementById("btn-retry").addEventListener("click", () => loadLesson(levelIndex));
+      return;
+    }
+    if (success) {
+      const word = FEEDBACK_WORDS[Math.floor(Math.random() * FEEDBACK_WORDS.length)];
+      el.innerHTML = `<span class="feedback-text">${word}</span>`;
+      return;
+    }
+    el.textContent = text || "";
+  }
+
+  function renderLevelRow() {
+    const row = document.getElementById("level-row");
+    row.innerHTML = "";
+    const progress = getProgress(chapterId);
+    const latestIndex = Math.min(progress, lessons.length - 1);
+
+    lessons.forEach((lv, i) => {
+      const box = document.createElement("div");
+      const isDone = i < progress || (i === levelIndex && solved);
+      const isLatest = i === latestIndex && !isDone;
+      const isViewing = i === levelIndex;
+      box.className = "level-box"
+        + (isLatest ? " current" : "")
+        + (isDone ? " done" : "")
+        + (isViewing ? " viewing" : "");
+      box.textContent = isDone ? "\u2713" : String(lv.level);
+
+      if (isDone || isLatest) {
+        box.addEventListener("click", () => {
+          if (i === levelIndex) return;
+          levelIndex = i;
+          loadLesson(levelIndex);
+        });
+      }
+      row.appendChild(box);
+    });
+  }
+
+  function handleSuccess() {
+    const wasAtFrontier = levelIndex === getProgress(chapterId);
+
+    solved = true;
+    renderInfoBody(null, true);
+    setProgress(chapterId, levelIndex + 1);
+    renderLevelRow();
+
+    if (!wasAtFrontier) return;
+
+    const isLastLevel = levelIndex === lessons.length - 1;
+    setTimeout(() => {
+      if (isLastLevel) {
+        showChapterComplete();
+      } else {
+        levelIndex += 1;
+        loadLesson(levelIndex);
+      }
+    }, 800);
+  }
+
+  function showChapterComplete() {
+    playSound("chapterDone");
+    const overlay = document.getElementById("chapter-overlay");
+    const order = window.LEARN_CHAPTER_ORDER;
+    const curIdx = order.indexOf(chapterId);
+    const nextId = order[curIdx + 1];
+    const nextMeta = nextId ? window.LEARN_CHAPTERS.find((c) => c.id === nextId) : null;
+
+    document.getElementById("chapter-headline").textContent =
+      Math.random() < 0.5 ? "Completed!" : "Congratulations!";
+
+    const nextBtn = document.getElementById("btn-next-chapter");
+    if (nextMeta) {
+      nextBtn.style.display = "block";
+      nextBtn.textContent = "Next: " + nextMeta.title;
+      nextBtn.onclick = () => { window.location.href = `learn.html?chapter=${nextMeta.id}`; };
+    } else {
+      nextBtn.style.display = "none";
+    }
+    overlay.classList.add("open");
+  }
+  document.getElementById("btn-close-chapter").addEventListener("click", () => {
+    document.getElementById("chapter-overlay").classList.remove("open");
+  });
+  document.getElementById("chapter-overlay").addEventListener("click", (e) => {
+    if (e.target.id === "chapter-overlay") e.currentTarget.classList.remove("open");
+  });
+  document.getElementById("btn-back-menu").addEventListener("click", () => {
+    window.location.href = "learn_lobby.html";
+  });
+  document.getElementById("btn-back").addEventListener("click", () => {
+    window.location.href = "learn_lobby.html";
+  });
+
+  // -------------------------------------------------------------------
+  // 启动
+  // -------------------------------------------------------------------
+  window.__starImg = new Image();
+  window.__starImg.src = "icons/star.png";
+  window.__starImg.onload = () => drawBoard();
+
+  if (window.ArkatanaPieces) {
+    window.ArkatanaPieces.preloadAll().then(() => drawBoard());
+  }
+
+  if (!lesson_placeholder_guard()) {
+    loadLesson(levelIndex);
+  }
+  function lesson_placeholder_guard() {
+    if (!chapterMeta || lessons.length === 0) {
+      document.querySelector(".layout").innerHTML =
+        `<div style="padding:40px;color:var(--parchment-light);">这个章节的训练题还在准备中，敬请期待。</div>`;
+      return true;
+    }
+    return false;
+  }
+})();
+</script>
+
+</body>
+</html>
