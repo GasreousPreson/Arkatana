@@ -59,11 +59,25 @@ from rules import is_in_check, GameResult
 from clock import TimeControl
 import db
 
-# ai/ 跟这个文件是仓库里的同级目录（AnicentChess/api.py 和 ai/play_service.py）。
-# 如果你的仓库结构不一样，把 ARKATANA_AI_DIR 环境变量设成 ai/ 目录的实际路径即可，
-# 不用改这里的代码。
-_AI_DIR = os.environ.get("ARKATANA_AI_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ai")
-if os.path.isdir(_AI_DIR) and _AI_DIR not in sys.path:
+# 找 ai/ 目录：不同仓库结构下 ai/ 相对 api.py 的位置不一样——
+#   - api.py 就在仓库根目录，ai/ 在同一层：  repo/api.py ,  repo/ai/play_service.py
+#   - api.py 在后端子目录里，ai/ 跟那个子目录同层：repo/AnicentChess/api.py , repo/ai/play_service.py
+# 两种都试一遍，不用猜哪种对——猜错了就是现在这个 ModuleNotFoundError 的根因。
+# 如果你的仓库结构跟这两种都不一样，把 ARKATANA_AI_DIR 环境变量设成 ai/ 目录的
+# 实际绝对路径即可，不用改这里的代码。
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_AI_DIR_CANDIDATES = [
+    os.environ.get("ARKATANA_AI_DIR", ""),
+    os.path.join(_THIS_DIR, "ai"),            # api.py 和 ai/ 同一层
+    os.path.join(_THIS_DIR, "..", "ai"),       # api.py 在子目录里，ai/ 跟子目录同层
+]
+_AI_DIR = next((p for p in _AI_DIR_CANDIDATES if p and os.path.isfile(os.path.join(p, "play_service.py"))), None)
+if _AI_DIR is None:
+    raise RuntimeError(
+        "找不到 ai/play_service.py，试过的路径：" + ", ".join(p for p in _AI_DIR_CANDIDATES if p) +
+        "。请确认 ai/ 文件夹已经放进仓库，或者设置环境变量 ARKATANA_AI_DIR 指向它的绝对路径。"
+    )
+if _AI_DIR not in sys.path:
     sys.path.insert(0, _AI_DIR)
 import play_service
 
