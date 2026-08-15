@@ -40,8 +40,9 @@ import secrets
 import random
 import time
 import os
+import sys
 
-from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect, Security
+from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect, Security, BackgroundTasks
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -57,6 +58,14 @@ from notation import format_game, move_notation, position_string_to_board
 from rules import is_in_check, GameResult
 from clock import TimeControl
 import db
+
+# ai/ 跟这个文件是仓库里的同级目录（AnicentChess/api.py 和 ai/play_service.py）。
+# 如果你的仓库结构不一样，把 ARKATANA_AI_DIR 环境变量设成 ai/ 目录的实际路径即可，
+# 不用改这里的代码。
+_AI_DIR = os.environ.get("ARKATANA_AI_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ai")
+if os.path.isdir(_AI_DIR) and _AI_DIR not in sys.path:
+    sys.path.insert(0, _AI_DIR)
+import play_service
 
 
 app = FastAPI(title="Arkatana API", version="0.7.0")
@@ -116,6 +125,13 @@ MAX_DRAW_OFFERS_PER_SIDE = 2
 # 完全不写数据库——不出现在大厅、Game History、Database 里，
 # 服务器重启就没了，就是一次性的本地演练，不是真正意义上的"一局对局"。
 EPHEMERAL_GAMES: set[str] = set()
+
+# Play against AI 用的对局标记：{game_id: {"side": "black"|"white", "difficulty": "easy"|"medium"|"hard"}}
+# 只标记"哪一方是AI、用什么难度"——AI 那一方在 GAME_PLAYERS 里存的是一个固定的
+# 展示名字（比如"🤖 AI（中等）"），不是真实用户名，这样能顺手复用现有的走棋权限
+# 校验（没有真人能以这个名字登录，自然没人能替AI手动走棋）和前端玩家名渲染逻辑，
+# 不需要为 AI 专门加一整套机制。细节见 create_game() 和 trigger_ai_move()。
+GAME_AI: dict[str, dict] = {}
 
 # 内存登录令牌存储：{token: username}
 # 注意：这是临时方案，服务器重启后所有人都需要重新登录。
@@ -178,12 +194,15 @@ class OfferResponseRequest(BaseModel):
 
 
 class CreateGameRequest(BaseModel):
-    side_preference: str = "random"     # "black" / "white" / "random"
+    side_preference: str = "random"     # "black" / "white" / "random"（对 AI 对局来说，
+                                          # 这里指的是"人类想执哪一方"，AI 拿另一方）
     rated: bool = False
     minutes_per_side: int | None = None  # None 表示无时间限制（比如"线下对练"）
     increment_seconds: int = 0
     single_device: bool = False          # True = "Single game"：同一台设备两人轮流下，
                                           # 不落库、不认领任何一方（双方都能操作）
+    vs_ai: bool = False                  # True = Play against AI：另一方由 AI 控制
+    ai_difficulty: str = "medium"        # "easy" / "medium" / "hard"，只在 vs_ai=True 时有意义
 
 
 class RegisterRequest(BaseModel):
@@ -245,6 +264,8 @@ def game_state(game_id: str, game: Game) -> dict:
     for move in game.legal_moves():
         legal_map.setdefault(coord_to_str(*move.from_sq), []).append(coord_to_str(*move.to_sq))
 
+    ai_info = GAME_AI.get(game_id)
+
     return {
         "game_id": game_id,
         "current_side": game.current_side.value,
@@ -254,6 +275,11 @@ def game_state(game_id: str, game: Game) -> dict:
         "black_player": players["black"],
         "white_player": players["white"],
         "rated": GAME_RATED.get(game_id, False),
+        "ai_side": ai_info["side"] if ai_info else None,       # "black"/"white"/None——
+        "ai_difficulty": ai_info["difficulty"] if ai_info else None,  # 前端用这个判断对手
+                                                                        # 是不是AI，不要去猜
+                                                                        # black_player/white_player
+                                                                        # 里的字符串格式
         "clock_started": game.clock.active_side is not None,
         "in_check": is_in_check(game.board, game.current_side) if game.result.value == "ongoing" else False,
         "pending_offer": GAME_OFFERS.get(game_id),
@@ -350,6 +376,53 @@ def maybe_finalize_rating(game_id: str, game: Game) -> None:
         "white": {"before": white_before, "after": new_white, "delta": new_white - white_before}
                  if white_before is not None else None,
     }
+
+
+async def trigger_ai_move(game_id: str) -> None:
+    """
+    后台任务：轮到 AI 走棋时调用（AI 执黑先手的开局第一步、或者人类走完之后
+    如果该 AI 应招了）。这个函数是在触发它的那次 HTTP 请求已经返回**之后**
+    才跑的（走 BackgroundTasks），AI 算出来的招法通过 WebSocket 推送给前端，
+    不会让人类那次请求被 AI 的思考时间（最长可能到30秒左右，见
+    ai/README.md 的性能记录）拖住。
+
+    play_service.choose_ai_move() 是纯 CPU 密集型同步函数，必须用
+    run_in_threadpool() 丢进线程池——直接调用会卡住事件循环，这段时间
+    服务器处理不了任何别的请求（包括别的对局的心跳/走棋）。
+    """
+    game = GAMES.get(game_id)
+    if game is None or game.result.value != "ongoing":
+        return
+    ai_info = GAME_AI.get(game_id)
+    if ai_info is None or game.current_side.value != ai_info["side"]:
+        return  # 不是轮到这个 AI（比如同一时间收到了多次触发），安全起见直接放弃
+
+    try:
+        result = await run_in_threadpool(
+            play_service.choose_ai_move, game.board, game.current_side, ai_info["difficulty"]
+        )
+    except Exception:
+        return  # AI 想不出棋不该发生在正常合法对局里；真出现异常也不应该让后台任务崩溃影响别的请求
+
+    if result.best_move is None:
+        return  # 理论上不会发生：轮到 AI 时游戏还是 ongoing，就必然有合法走法
+
+    # 落子前再确认一次状态没变——AI 思考的这几秒里，人类可能已经认输/悔棋，
+    # 或者对局被取消了。
+    game = GAMES.get(game_id)
+    if game is None or game.result.value != "ongoing" or game.current_side.value != ai_info["side"]:
+        return
+
+    try:
+        record = game.make_move(result.best_move.from_sq, result.best_move.to_sq)
+    except (IllegalMoveError, GameOverError):
+        return  # 防御性兜底：AI 只会选自己搜索器认证过的合法招法，正常不该走到这里
+
+    response = game_state(game_id, game)
+    response["last_move"] = move_notation(record)
+    await persist(game_id, game)
+    maybe_finalize_rating(game_id, game)  # AI 对局创建时已经强制 rated=False，这里调用只是保持跟人类走棋路径一致，内部会正确地什么都不做
+    await manager.broadcast(game_id, response)
 
 
 def start_game_if_needed(game: Game) -> bool:
@@ -545,6 +618,7 @@ def get_user_rating(username: str):
 
 @app.post("/games")
 async def create_game(
+    background_tasks: BackgroundTasks,
     body: CreateGameRequest | None = None,
     x_auth_token: str = Security(auth_scheme),
     x_guest_id: str | None = Header(default=None),
@@ -563,13 +637,21 @@ async def create_game(
     rated（排位）对局只能随机先后手，不能指定执黑/执白；
     而且 rated 对局必须设置时间控制（不能是无时间限制的"线下对练"模式）。
 
+    vs_ai=True 时创建一局 Play against AI 对局：side_preference 表示"人类想执
+    哪一方"，AI 自动拿另一方，用 ai_difficulty 指定的难度思考。这种对局不支持
+    rated（AI 不参与排位分），也不能跟 single_device 同时开启。两个"位置"
+    创建的这一刻就都确定了，不用等真人加入；如果 AI 恰好执黑（先手），
+    创建请求返回之后，AI 的第一步棋会在后台算完再通过 WebSocket 推送过来——
+    不会让这次创建请求被 AI 的思考时间拖住。
+
     时间控制：minutes_per_side 留空表示无时间限制；否则两个数值都必须落在
     约定好的离散档位上（TimeControl 内部会自动校验，不合法会返回 400）。
 
     棋钟什么时候开始走：不管匿名还是账号对局，创建的这一刻都**不会**开始计时——
     对局会先"晾在大厅里"等人进来，真正开始的时机由 /games/{id}/start 或
     /games/{id}/join（账号对局凑齐两人时）触发，避免创建者一个人干等的时候
-    自己的棋钟却在空转。
+    自己的棋钟却在空转。（vs_ai 对局例外——两个位置立刻就确定了，不用等，
+    创建成功就直接开始计时。）
     """
     creator = get_current_user(x_auth_token)
     if x_auth_token and creator is None:
@@ -584,11 +666,20 @@ async def create_game(
     rated = bool(body.rated) if body else False
     minutes_per_side = body.minutes_per_side if body else None
     increment_seconds = (body.increment_seconds if body else 0) or 0
+    vs_ai = bool(body.vs_ai) if body else False
+    ai_difficulty = (body.ai_difficulty if body else "medium").strip().lower()
 
     if single_device and rated:
         raise HTTPException(status_code=400, detail="single game 不支持 rated")
     if single_device:
         minutes_per_side = None  # single game 不显示也不需要时间控制
+
+    if vs_ai and single_device:
+        raise HTTPException(status_code=400, detail="vs_ai 不能跟 single_device 同时开启")
+    if vs_ai and rated:
+        raise HTTPException(status_code=400, detail="AI 对局不支持 rated")
+    if vs_ai and not play_service.is_valid_difficulty(ai_difficulty):
+        raise HTTPException(status_code=400, detail=f"未知的 AI 难度：{ai_difficulty}")
 
     if rated and preference != "random":
         raise HTTPException(status_code=400, detail="rated 对局只能随机先后手，不能指定执黑/执白")
@@ -622,6 +713,46 @@ async def create_game(
         state = game_state(game_id, GAMES[game_id])
         await manager.broadcast(game_id, state)
         return {**state, "my_side": None}
+
+    if vs_ai:
+        # Play against AI：另一方由 AI 控制。AI 那一方在 GAME_PLAYERS 里存的是
+        # 一个固定的展示名字（比如"🤖 AI（中等）"）而不是真实用户名——没有真人
+        # 能以这个名字登录，所以现有的走棋权限校验（比对 X-Auth-Token 对应的
+        # 用户名）天然就会拒绝任何人类替 AI 手动走棋，不需要专门加一套机制；
+        # 前端渲染玩家名的地方也不用改，直接把这个字符串当成对手名字显示就行。
+        human_side = preference if preference in ("black", "white") else random.choice(["black", "white"])
+        ai_side = "white" if human_side == "black" else "black"
+        ai_name = play_service.ai_display_name(ai_difficulty)
+
+        black_slot = creator if human_side == "black" else ai_name
+        white_slot = creator if human_side == "white" else ai_name
+        GAME_PLAYERS[game_id] = {"black": black_slot, "white": white_slot}
+        GAME_RATED[game_id] = False
+        GAME_AI[game_id] = {"side": ai_side, "difficulty": ai_difficulty}
+
+        if creator is None and x_guest_id:
+            get_guest_claims(game_id)[human_side] = x_guest_id
+
+        await persist(
+            game_id, GAMES[game_id],
+            black_player=black_slot, white_player=white_slot, rated=False,
+            was_random_side=(preference not in ("black", "white")),
+        )
+
+        # 两个位置这一刻就都确定了，不用像人类对局那样等对方 /join，直接开始计时
+        # （如果设置了时间控制的话）。
+        start_game_if_needed(GAMES[game_id])
+
+        state = game_state(game_id, GAMES[game_id])
+        await manager.broadcast(game_id, state)
+
+        if ai_side == "black":
+            # AI 执黑先手：创建请求正常速度返回，AI 的第一步棋放到后台算，
+            # 算完了自己走、自己存档、自己广播——不能在这里直接 await，
+            # 那样会让这次"创建对局"请求被 AI 的思考时间（最长可能到30秒）拖住。
+            background_tasks.add_task(trigger_ai_move, game_id)
+
+        return {**state, "my_side": resolve_my_side(game_id, creator, x_guest_id)}
 
     black_slot: str | None = None
     white_slot: str | None = None
@@ -733,6 +864,7 @@ def _discard_game(game_id: str) -> None:
     GAME_PLAYERS.pop(game_id, None)
     GAME_GUEST_CLAIMS.pop(game_id, None)
     GAME_RATED.pop(game_id, None)
+    GAME_AI.pop(game_id, None)
     EPHEMERAL_GAMES.discard(game_id)
     db.delete_game(game_id)
 
@@ -804,6 +936,7 @@ def get_legal_moves(game_id: str, coord: str):
 async def make_move(
     game_id: str,
     move: MoveRequest,
+    background_tasks: BackgroundTasks,
     x_auth_token: str = Security(auth_scheme),
     x_guest_id: str | None = Header(default=None),
 ):
@@ -860,6 +993,13 @@ async def make_move(
     await persist(game_id, game)
     maybe_finalize_rating(game_id, game)
     await manager.broadcast(game_id, response)
+
+    ai_info = GAME_AI.get(game_id)
+    if ai_info is not None and game.result.value == "ongoing" and game.current_side.value == ai_info["side"]:
+        # 人类这一步刚好让局面轮到了 AI——放进后台任务去想，不在这次请求里等，
+        # 免得人类提交这一步之后，页面要卡最长约30秒才收到响应。
+        background_tasks.add_task(trigger_ai_move, game_id)
+
     my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)
     return {**response, "my_side": my_side}
 

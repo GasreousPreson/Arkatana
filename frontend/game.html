@@ -1759,11 +1759,14 @@
     topRatingEl.textContent = "";
     bottomRatingEl.textContent = "";
 
-    if (nameOf[topSide]) {
+    // AI 对手没有真实评分——db.get_rating() 对任何查不到的用户名都会返回一个
+    // 默认初始分，如果照常去查会在 AI 名字旁边显示一个看起来像是真评分、
+    // 实际上毫无意义的数字，所以这里直接跳过，不发这次请求。
+    if (nameOf[topSide] && state.ai_side !== topSide) {
       const r = await fetchRating(nameOf[topSide]);
       if (r) topRatingEl.textContent = r.rating;
     }
-    if (nameOf[bottomSide]) {
+    if (nameOf[bottomSide] && state.ai_side !== bottomSide) {
       const r = await fetchRating(nameOf[bottomSide]);
       if (r) bottomRatingEl.textContent = r.rating;
     }

@@ -491,7 +491,7 @@
     <aside class="right-column">
       <button class="action-btn" id="btn-create-game">⚔️ Create a game</button>
       <button class="action-btn" id="btn-single-game">👤 Single game</button>
-      <button class="action-btn disabled" data-name="ai-game">🤖 Play against ai</button>
+      <button class="action-btn" id="btn-ai-game">🤖 Play against ai</button>
 
       <div class="panel disabled">
         <h2>Leaderboard <span class="more">more »</span></h2>
@@ -552,6 +552,45 @@
 
     <button id="cg-create-btn" class="action-btn">Create lobby game</button>
     <div class="modal-msg" id="cg-msg"></div>
+  </div>
+</div>
+
+<!-- Play against AI 弹窗 -->
+<div id="ai-game-modal" class="modal-overlay" style="display:none;">
+  <div class="modal-box create-game-box">
+    <button class="modal-close" id="btn-close-ai">✕</button>
+    <h3>Play against AI</h3>
+
+    <div class="slider-row">
+      <label>minutes per side <span class="value" id="ai-minutes-label">10</span></label>
+      <input type="range" id="ai-minutes-slider" min="0" max="35" value="9">
+    </div>
+    <div class="slider-row">
+      <label>increment in seconds <span class="value" id="ai-increment-label">0</span></label>
+      <input type="range" id="ai-increment-slider" min="0" max="36" value="0">
+    </div>
+
+    <div class="side-row">
+      <div class="side-option" data-side="black" id="ai-side-black">
+        <div class="side-icon-wrap" id="ai-icon-black"></div>black
+      </div>
+      <div class="side-option" data-side="random" id="ai-side-random">
+        <div class="side-icon-wrap" id="ai-icon-random"></div>random side
+      </div>
+      <div class="side-option" data-side="white" id="ai-side-white">
+        <div class="side-icon-wrap" id="ai-icon-white"></div>white
+      </div>
+    </div>
+
+    <div class="toggle-row" style="margin-top:18px;">
+      <button type="button" id="ai-toggle-easy" class="toggle-btn">简单</button>
+      <button type="button" id="ai-toggle-medium" class="toggle-btn">中等</button>
+      <button type="button" id="ai-toggle-hard" class="toggle-btn">困难</button>
+    </div>
+    <div class="modal-msg" id="ai-difficulty-note" style="margin-bottom:10px;"></div>
+
+    <button id="ai-create-btn" class="action-btn">Play against AI</button>
+    <div class="modal-msg" id="ai-msg"></div>
   </div>
 </div>
 
@@ -1027,6 +1066,126 @@
       window.location.href = `game.html?id=${data.game_id}&single=1`;
     } catch (err) {
       showToast("创建失败：" + err.message);
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Play against AI 弹窗：时间控制滑杆 + 执黑/随机/执白 + 难度选择
+  // 跟"创建对局"弹窗共用同一套 CSS（.slider-row / .toggle-row / .side-row），
+  // 只是没有 casual/rated 切换——AI 对局不支持 rated（后端会直接拒绝），
+  // 所以这里干脆不提供这个选项，省得选了也会报错。
+  // -------------------------------------------------------------------
+  const aiModal = document.getElementById("ai-game-modal");
+  const aiMinutesSlider = document.getElementById("ai-minutes-slider");
+  const aiIncrementSlider = document.getElementById("ai-increment-slider");
+  const aiMinutesLabel = document.getElementById("ai-minutes-label");
+  const aiIncrementLabel = document.getElementById("ai-increment-label");
+  const aiSideEls = {
+    black: document.getElementById("ai-side-black"),
+    random: document.getElementById("ai-side-random"),
+    white: document.getElementById("ai-side-white"),
+  };
+  const aiDifficultyBtns = {
+    easy: document.getElementById("ai-toggle-easy"),
+    medium: document.getElementById("ai-toggle-medium"),
+    hard: document.getElementById("ai-toggle-hard"),
+  };
+  const aiDifficultyNote = document.getElementById("ai-difficulty-note");
+  const aiCreateBtn = document.getElementById("ai-create-btn");
+  const aiMsg = document.getElementById("ai-msg");
+
+  const AI_DIFFICULTY_NOTES = {
+    easy: "反应很快，适合刚上手的玩家。",
+    medium: "每步大约1秒内，实力适中。",
+    hard: "每步最长可能要思考将近30秒（开局阶段最慢），棋力更强——AI 在后台想的时候可以先看看棋盘，招法会自动通过通知推送过来。",
+  };
+
+  if (window.ArkatanaShared) {
+    document.getElementById("ai-icon-black").innerHTML = window.ArkatanaShared.sideIcon("black", 30);
+    document.getElementById("ai-icon-random").innerHTML = window.ArkatanaShared.sideIcon("random", 30);
+    document.getElementById("ai-icon-white").innerHTML = window.ArkatanaShared.sideIcon("white", 30);
+  }
+
+  aiMinutesSlider.max = ALLOWED_MINUTES.length - 1;
+  aiIncrementSlider.max = ALLOWED_INCREMENTS.length - 1;
+
+  let aiSide = "random";       // "black" | "random" | "white" —— 这里指人类想执哪一方
+  let aiDifficulty = "medium"; // "easy" | "medium" | "hard"
+
+  function updateAiSliderLabels() {
+    aiMinutesLabel.textContent = ALLOWED_MINUTES[aiMinutesSlider.value];
+    aiIncrementLabel.textContent = ALLOWED_INCREMENTS[aiIncrementSlider.value];
+  }
+  aiMinutesSlider.addEventListener("input", updateAiSliderLabels);
+  aiIncrementSlider.addEventListener("input", updateAiSliderLabels);
+
+  function renderAiSideSelection() {
+    Object.entries(aiSideEls).forEach(([key, el]) => {
+      el.classList.toggle("selected", key === aiSide);
+    });
+  }
+  Object.values(aiSideEls).forEach((el) => {
+    el.addEventListener("click", () => {
+      aiSide = el.dataset.side;
+      renderAiSideSelection();
+    });
+  });
+
+  function renderAiDifficulty() {
+    Object.entries(aiDifficultyBtns).forEach(([key, el]) => {
+      el.classList.toggle("active", key === aiDifficulty);
+    });
+    aiDifficultyNote.textContent = AI_DIFFICULTY_NOTES[aiDifficulty] || "";
+  }
+  Object.entries(aiDifficultyBtns).forEach(([key, el]) => {
+    el.addEventListener("click", () => {
+      aiDifficulty = key;
+      renderAiDifficulty();
+    });
+  });
+
+  function openAiModal() {
+    aiSide = "random";
+    aiDifficulty = "medium";
+    renderAiSideSelection();
+    renderAiDifficulty();
+    aiMinutesSlider.value = ALLOWED_MINUTES.indexOf(10);
+    aiIncrementSlider.value = ALLOWED_INCREMENTS.indexOf(0);
+    updateAiSliderLabels();
+    aiMsg.textContent = "";
+    aiCreateBtn.textContent = "Play against AI";
+    aiCreateBtn.disabled = false;
+    aiModal.style.display = "flex";
+  }
+
+  document.getElementById("btn-ai-game").addEventListener("click", openAiModal);
+  document.getElementById("btn-close-ai").addEventListener("click", () => {
+    aiModal.style.display = "none";
+  });
+
+  aiCreateBtn.addEventListener("click", async () => {
+    aiCreateBtn.textContent = "Creating";
+    aiCreateBtn.disabled = true;
+    aiMsg.textContent = "";
+
+    const body = {
+      side_preference: aiSide,
+      vs_ai: true,
+      ai_difficulty: aiDifficulty,
+      minutes_per_side: ALLOWED_MINUTES[aiMinutesSlider.value],
+      increment_seconds: ALLOWED_INCREMENTS[aiIncrementSlider.value],
+    };
+
+    try {
+      const data = await apiPost("/games", body);
+      window.location.href = `game.html?id=${data.game_id}`;
+    } catch (err) {
+      if (err.message.includes("登录状态已失效")) {
+        setAuth(null, null);
+      }
+      aiMsg.textContent = err.message;
+      aiCreateBtn.textContent = "Play against AI";
+      aiCreateBtn.disabled = false;
     }
   });
 
