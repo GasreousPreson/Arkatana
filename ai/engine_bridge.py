@@ -168,13 +168,32 @@ class Move(NamedTuple):
 # ---------------------------------------------------------------------------
 
 class Position:
-    __slots__ = ("types", "sides", "flags", "side_to_move")
+    __slots__ = ("types", "sides", "flags", "side_to_move", "_black_throne_idx", "_white_throne_idx",
+                 "_type_counts")
 
     def __init__(self) -> None:
         self.types = [EMPTY] * NUM_SQUARES
         self.sides = [BLACK] * NUM_SQUARES
         self.flags = [0] * NUM_SQUARES
         self.side_to_move = BLACK
+        # 王城位置缓存——王城的 pseudo_moves 恒为空（一步都不能走），在正常的
+        # 合法对局/搜索里也不会真的被吃掉（杀城判定会在那之前就终止这条分支，
+        # 详见 find_throne() 的说明），缓存下来能省掉 find_throne() 每次
+        # 全盘扫描 132 格的开销——这是 is_in_check/count_attackers 里
+        # 调用最频繁的一步，值得单独缓存。
+        self._black_throne_idx: Optional[int] = None
+        self._white_throne_idx: Optional[int] = None
+        # 每种棋子每方还剩几个——is_square_attacked() 反向探测时，如果
+        # 对方这种棋子已经一个都不剩（比如所有攻城塔都被吃光了），
+        # 直接跳过整段几何探测，不用white白扫一遍棋盘。
+        # 下标 = side*12 + piece_type。
+        self._type_counts = [0] * (2 * (THRONE + 1))
+
+    def _count_idx(self, side: int, piece_type: int) -> int:
+        return side * (THRONE + 1) + piece_type
+
+    def has_any(self, side: int, piece_type: int) -> bool:
+        return self._type_counts[self._count_idx(side, piece_type)] > 0
 
     # -- 基础读写（坐标一律用 (col,row) 元组，跟后端保持同一套"外部接口"）--------
 
@@ -199,12 +218,29 @@ class Position:
     def place(self, coord: tuple[int, int], piece_type: int, side: int,
               has_moved: bool = False, promoted: bool = False) -> None:
         idx = sq_index(*coord)
+        if self.types[idx] != EMPTY:
+            # 这个格子原本就有棋子（比如测试代码直接往同一格 place 两次）——
+            # 先把旧棋子的计数退掉，不然计数会跟棋盘实际状况对不上。
+            self._type_counts[self._count_idx(self.sides[idx], self.types[idx])] -= 1
         self.types[idx] = piece_type
         self.sides[idx] = side
         self.flags[idx] = (HAS_MOVED if has_moved else 0) | (PROMOTED if promoted else 0)
+        self._type_counts[self._count_idx(side, piece_type)] += 1
+        if piece_type == THRONE:
+            if side == BLACK:
+                self._black_throne_idx = idx
+            else:
+                self._white_throne_idx = idx
 
     def clear(self, coord: tuple[int, int]) -> None:
         idx = sq_index(*coord)
+        if self.types[idx] != EMPTY:
+            self._type_counts[self._count_idx(self.sides[idx], self.types[idx])] -= 1
+        if self.types[idx] == THRONE:
+            if self._black_throne_idx == idx:
+                self._black_throne_idx = None
+            elif self._white_throne_idx == idx:
+                self._white_throne_idx = None
         self.types[idx] = EMPTY
         self.sides[idx] = BLACK
         self.flags[idx] = 0
@@ -221,9 +257,13 @@ class Position:
         p.sides = self.sides[:]
         p.flags = self.flags[:]
         p.side_to_move = self.side_to_move
+        p._black_throne_idx = self._black_throne_idx
+        p._white_throne_idx = self._white_throne_idx
+        p._type_counts = self._type_counts[:]
         return p
 
     # -- 初始摆位（对应 layout.py）-------------------------------------------
+
 
     _BLACK_LAYOUT = {
         THRONE: ["f1"],
@@ -600,7 +640,10 @@ def generate_side_moves(pos: Position, side: int) -> list[Move]:
     return moves
 
 
-def is_square_attacked(pos: Position, coord: tuple[int, int], by_side: int) -> bool:
+def _is_square_attacked_naive(pos: Position, coord: tuple[int, int], by_side: int) -> bool:
+    """原始写法：把 by_side 每个棋子的完整走法都生成一遍，看有没有一条吃到 coord。
+    正确但很慢（每次调用都是 O(敌方棋子数 × 每个棋子的完整走法生成)），
+    只留着给 is_square_attacked() 做交叉验证用，正式逻辑不会再调用它。"""
     for src in pos.occupied_coords():
         idx = sq_index(*src)
         if pos.sides[idx] != by_side:
@@ -611,15 +654,211 @@ def is_square_attacked(pos: Position, coord: tuple[int, int], by_side: int) -> b
     return False
 
 
+def is_square_attacked(pos: Position, coord: tuple[int, int], by_side: int) -> bool:
+    """coord 是否处于 by_side 的攻击范围内——is_in_check/count_attackers/
+    get_legal_moves 全都靠它，是搜索里调用最频繁的函数，值得单独优化。
+
+    跟朴素写法（挨个生成 by_side 每颗棋子的完整走法，看有没有一条落在 coord）
+    结果完全等价，但换了个方向算：不去问"棋盘上每颗敌方棋子能不能吃到这里"，
+    而是反过来问"如果 coord 这个位置站着一颗某种棋子，它的吃子规则往外探，
+    探到的第一个/射程内的棋子，是不是恰好是 by_side 的这个类型"——
+    只需要按每种棋子的攻击几何探固定的几个方向/距离，不用理会棋盘上
+    跟这次判断无关的其他棋子，也不用给每颗敌方棋子都生成一遍完整走法列表。
+
+    正确性由 ai/tests/test_engine_bridge.py 里跟 _is_square_attacked_naive()
+    的大规模随机交叉验证保证（间接也就是跟网站权威引擎保证一致，因为
+    _is_square_attacked_naive 本身已经通过了权威引擎的交叉验证）。
+    """
+    # "攻击"这个概念本身依赖 coord 上真的站着敌方棋子——空格或者站着 by_side
+    # 自己人都谈不上"吃"，直接短路返回，顺便也省掉后面一大堆几何探测。
+    coord_idx = sq_index(*coord)
+    if pos.types[coord_idx] == EMPTY or pos.sides[coord_idx] == by_side:
+        return False
+
+    cx, cy = coord
+    fwd = FORWARD[by_side]   # by_side 棋子自己的"前进方向"
+
+    def occ(dest):
+        """越界返回 None；否则返回 (piece_type, side) 或 None（空格）。"""
+        if not is_valid_coord(*dest):
+            return None
+        idx = sq_index(*dest)
+        t = pos.types[idx]
+        if t == EMPTY:
+
+            return None
+        return t, pos.sides[idx]
+
+    # ---- 兵 Pawn：未升变只能正前方一格吃；升变后5个方向各一格都能吃 ----
+    if pos.has_any(by_side, PAWN):
+        for dx, dy in ((0, fwd), (1, fwd), (-1, fwd), (1, 0), (-1, 0)):
+            info = occ((cx - dx, cy - dy))
+            if info and info[1] == by_side and info[0] == PAWN:
+                idx = sq_index(cx - dx, cy - dy)
+                promoted = bool(pos.flags[idx] & PROMOTED)
+                if (dx, dy) == (0, fwd) or promoted:
+                    return True
+
+    # ---- 弩车 Ballista：斜前一格直接吃 + 斜线隔子吃（射程4）----
+    if pos.has_any(by_side, BALLISTA):
+        for dx, dy in ((1, fwd), (-1, fwd)):
+            info = occ((cx - dx, cy - dy))
+            if info and info[1] == by_side and info[0] == BALLISTA:
+                return True
+        if _reverse_screen_attacked(pos, coord, by_side, DIAGONAL_DIRS, 4, BALLISTA):
+            return True
+
+    # ---- 炮塔 Turret：正前一格直接吃 + 横/竖隔子吃（首步横向5格，其余4格）----
+    if pos.has_any(by_side, TURRET):
+        info = occ((cx, cy - fwd))
+        if info and info[1] == by_side and info[0] == TURRET:
+            return True
+
+        def _turret_h_range(flags):
+            if not (flags & HAS_MOVED):
+                return _TURRET_FIRST_MOVE_H_RANGE
+            return _TURRET_UPGRADED_RANGE if (flags & PROMOTED) else _TURRET_BASE_RANGE
+
+        if _reverse_screen_attacked(pos, coord, by_side, _TURRET_H_DIRS, 5, TURRET,
+                                     extra_check=lambda att_idx, dist: dist <= _turret_h_range(pos.flags[att_idx])):
+            return True
+        if _reverse_screen_attacked(pos, coord, by_side, _TURRET_V_DIRS, 5, TURRET,
+                                     extra_check=lambda att_idx, dist: dist <= (
+                                         _TURRET_UPGRADED_RANGE if (pos.flags[att_idx] & PROMOTED) else _TURRET_BASE_RANGE
+                                     )):
+            return True
+
+    # ---- 大将 Ares：米字8方向，射程2内无视阻挡直接吃 ----
+    if pos.has_any(by_side, ARES):
+        for dx, dy in EIGHT_DIRS:
+            for dist in (1, 2):
+                info = occ((cx - dx * dist, cy - dy * dist))
+                if info and info[1] == by_side and info[0] == ARES:
+                    return True
+
+    # ---- 轻骑 Hussar / 重骑 Knight：固定偏移跳跃（偏移集合本身关于取负对称，
+    # 直接复用同一份偏移表即可，不需要单独反向）----
+    if pos.has_any(by_side, HUSSAR):
+        for dx, dy in _HUSSAR_OFFSETS:
+            info = occ((cx - dx, cy - dy))
+            if info and info[1] == by_side and info[0] == HUSSAR:
+                return True
+    if pos.has_any(by_side, KNIGHT):
+        for dx, dy in _KNIGHT_OFFSETS:
+            info = occ((cx - dx, cy - dy))
+            if info and info[1] == by_side and info[0] == KNIGHT:
+                return True
+
+    # ---- 攻城塔 Rook / 凤凰 Phoenix：滑动吃子，沿线第一个棋子如果正好是
+    # by_side 的对应类型就命中，不是的话这条线上更远的棋子也够不着（会被
+    # 这第一个棋子挡住），不用继续探 ----
+    if pos.has_any(by_side, ROOK):
+        for dx, dy in STRAIGHT_DIRS:
+            dist = 1
+            while True:
+                info = occ((cx - dx * dist, cy - dy * dist))
+                if info is None:
+                    if not is_valid_coord(cx - dx * dist, cy - dy * dist):
+                        break
+                    dist += 1
+                    continue
+                if info[1] == by_side and info[0] == ROOK:
+                    return True
+                break
+    if pos.has_any(by_side, PHOENIX):
+        for dx, dy in DIAGONAL_DIRS:
+            dist = 1
+            while True:
+                info = occ((cx - dx * dist, cy - dy * dist))
+                if info is None:
+                    if not is_valid_coord(cx - dx * dist, cy - dy * dist):
+                        break
+                    dist += 1
+                    continue
+                if info[1] == by_side and info[0] == PHOENIX:
+                    return True
+                break
+
+    # ---- 剑士 Swordsman：未升变=正前/斜前2格跳吃；升变=米字8方向恰好2格跳吃 ----
+    if pos.has_any(by_side, SWORDSMAN):
+        for dx, dy in ((0, fwd), (1, fwd), (-1, fwd)):
+            dest = (cx - dx * 2, cy - dy * 2)
+            info = occ(dest)
+            if info and info[1] == by_side and info[0] == SWORDSMAN and not (pos.flags[sq_index(*dest)] & PROMOTED):
+                return True
+        for dx, dy in EIGHT_DIRS:
+            dest = (cx - dx * 2, cy - dy * 2)
+            info = occ(dest)
+            if info and info[1] == by_side and info[0] == SWORDSMAN and (pos.flags[sq_index(*dest)] & PROMOTED):
+                return True
+
+    # ---- 战车 Chariot：直线跳吃，未升变距离{2,3}，升变{2,3,4} ----
+    if pos.has_any(by_side, CHARIOT):
+        for dx, dy in STRAIGHT_DIRS:
+            for dist in (2, 3, 4):
+                dest = (cx - dx * dist, cy - dy * dist)
+                info = occ(dest)
+                if info and info[1] == by_side and info[0] == CHARIOT:
+                    promoted = bool(pos.flags[sq_index(*dest)] & PROMOTED)
+                    if dist <= 3 or promoted:
+                        return True
+
+    return False
+
+
+def _reverse_screen_attacked(pos: Position, coord, by_side, directions, max_range, piece_type,
+                              extra_check=None) -> bool:
+    """隔山打牛类吃法（弩车/炮塔共用）的反向探测：从 coord 往外扫，
+    第一个遇到的棋子当"炮架"（谁都行），炮架之后但仍在射程内、
+    是 by_side 的 piece_type，就说明 coord 正被这样一颗棋子攻击。
+    extra_check(attacker_square_index, dist) 用于炮塔那种"横/竖射程可能不同、
+    还跟 has_moved/promoted 状态相关"的场合，返回 False 表示这个距离不算命中。"""
+    cx, cy = coord
+    for dx, dy in directions:
+        screen_found = False
+        for dist in range(1, max_range + 1):
+            dest = (cx - dx * dist, cy - dy * dist)
+            if not is_valid_coord(*dest):
+                break
+            idx = sq_index(*dest)
+            if pos.types[idx] == EMPTY:
+                continue
+            if not screen_found:
+                screen_found = True
+                continue
+            if pos.sides[idx] == by_side and pos.types[idx] == piece_type:
+                if extra_check is None or extra_check(idx, dist):
+                    return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # 局面规则（对应 rules.py + game.py 的升变部分）
 # ---------------------------------------------------------------------------
 
 def find_throne(pos: Position, side: int) -> Optional[tuple[int, int]]:
-    idx = side  # placeholder to keep lints quiet; real lookup below
+    """王城位置直接查缓存（Position.place()/clear() 维护），命中率100%——
+    王城自己永远不会移动（pseudo_moves 恒为空），在任何走完 get_legal_moves()
+    过滤的合法对局/搜索里也不会真的被吃掉：一方的王城被将军时，
+    走这步棋的是"对方"，而对方自己的 get_legal_moves() 早就把"会让自己
+    王城被将军"的走法过滤掉了，所以轮到对方走的那一刻，我方王城必然
+    没有被将军（count_attackers==0），对方这一步的候选走法里根本不会
+    出现"落在我方王城格子上"这个选项——王城因此始终不会真的从棋盘上消失。
+    这里仍然做一次防御性复核（缓存的格子上是否真的还是这一方的王城），
+    万一将来哪里以不常见的方式绕过了 place()/clear() 破坏了缓存，
+    能自动退回全盘扫描而不是悄悄返回错误坐标。
+    """
+    cached = pos._black_throne_idx if side == BLACK else pos._white_throne_idx
+    if cached is not None and pos.types[cached] == THRONE and pos.sides[cached] == side:
+        return index_to_coord(cached)
+
     for coord in pos.occupied_coords():
         i = sq_index(*coord)
         if pos.types[i] == THRONE and pos.sides[i] == side:
+            if side == BLACK:
+                pos._black_throne_idx = i
+            else:
+                pos._white_throne_idx = i
             return coord
     return None
 
@@ -632,6 +871,15 @@ def _bare_apply_move(pos: Position, move: Move) -> Optional[tuple[int, int, int]
     captured = None
     if pos.types[ti] != EMPTY:
         captured = (pos.types[ti], pos.sides[ti], pos.flags[ti])
+        pos._type_counts[pos._count_idx(pos.sides[ti], pos.types[ti])] -= 1
+        if pos.types[ti] == THRONE:
+            # 正常合法对局里不会走到这一步（见 find_throne 的说明），
+            # 但既然真的发生了，缓存必须老实跟着失效，不能留着一个指向
+            # "已经不是王城"的格子的缓存值。
+            if pos.sides[ti] == BLACK:
+                pos._black_throne_idx = None
+            else:
+                pos._white_throne_idx = None
     pos.types[ti] = pos.types[fi]
     pos.sides[ti] = pos.sides[fi]
     pos.flags[ti] = pos.flags[fi] | HAS_MOVED
@@ -683,8 +931,49 @@ def count_attackers(pos: Position, side: int) -> int:
 
 
 def get_legal_moves(pos: Position, side: int) -> list[Move]:
+    """规则跟朴素写法完全一样："试走一步，看自己王城会不会因此暴露"——
+    但对大多数走法，其实不用真的试走也能确定安全，可以跳过昂贵的
+    clone+apply+is_in_check：
+
+    这个棋种里，需要"隔着棋子看"的攻击方式只有两类——滑动吃子（攻城塔/凤凰，
+    遇子即停）和隔山打牛（弩车/炮塔，需要恰好一个炮架）。除此之外的兵/大将/
+    轻骑/重骑/剑士/战车，走法要么是固定距离直接判断，要么明确"无视阻挡"，
+    完全不关心中间格子上站着什么。也就是说：一颗棋子的离开，只有在它原来
+    的格子跟己方王城同行/同列/同斜线时，才可能"松开"一条本来被挡住的攻击线；
+    如果不同行不同列不同斜线，这颗棋子挪走绝对不可能让王城暴露。
+
+    所以：当前没有被将军时，只有"起点跟王城同行/同列/同斜线"的走法才需要
+    真的试走验证，其余走法可以直接判定合法。已经被将军的局面（占比很小）
+    还是老老实实全部试走一遍，不做这个近似——这部分逻辑复杂、出错代价高，
+    没必要为了这一小部分场景冒风险。
+
+    正确性由 ai/tests/test_engine_bridge.py 里跟原始"全部试走一遍"写法的
+    大规模随机交叉验证保证。
+    """
+    throne = find_throne(pos, side)
+    currently_in_check = is_in_check(pos, side) if throne is not None else False
+
     legal = []
     for move in generate_side_moves(pos, side):
+        if throne is not None and not currently_in_check:
+            fx, fy = move.from_sq
+            tx, ty = throne
+            origin_colinear = fx == tx or fy == ty or abs(fx - tx) == abs(fy - ty)
+            # 非吃子的走法，目标格从"空"变"有棋子"，也可能有风险——这个棋种
+            # 里弩车/炮塔是"隔山打牛"，需要恰好一个炮架才能吃到炮架后面的目标；
+            # 如果之前王城前方那条线上压根没有炮架（所以打不到），我这一步
+            # 恰好把自己的棋子挪进了那个空当，等于帮敌方弩车/炮塔"递"了一个
+            # 炮架，反而把王城暴露出来——这跟经典象棋"挡子只会更安全"的直觉
+            # 不一样，是这个隔山打牛机制特有的坑，必须额外考虑目标格。
+            # 吃子的走法不必再查目标格：目标格吃子前后都是"有棋子"，
+            # 占用状态没变，不会新增炮架。
+            dest_colinear = False
+            if not move.is_capture:
+                dx, dy = move.to_sq
+                dest_colinear = dx == tx or dy == ty or abs(dx - tx) == abs(dy - ty)
+            if not origin_colinear and not dest_colinear:
+                legal.append(move)
+                continue
         trial = pos.clone()
         _bare_apply_move(trial, move)
         if not is_in_check(trial, side):
