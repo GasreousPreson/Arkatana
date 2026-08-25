@@ -29,6 +29,8 @@ ai/evaluate.py
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from engine_bridge import (
     ARES, BALLISTA, BLACK, CHARIOT, EMPTY, HUSSAR, KNIGHT, MAX_ROW, MIN_ROW,
     NUM_COLS, PAWN, PHOENIX, PROMOTED, ROOK, STRAIGHT_DIRS, DIAGONAL_DIRS,
@@ -68,6 +70,26 @@ CENTER_WEIGHT = 0.06          # 每个子的中心加成上限约0.06分，纯�
                               # 优先往中间走"的轻微倾向，不足以驱动任何弃子
 TEMPO_BONUS = 0.15            # 轮到谁走谁白拿一点点，避免评估在偶数/奇数深度
                               # 之间来回跳（Stockfish 的 tempo 也是这个作用）
+
+
+class Weights(NamedTuple):
+    """评估函数里各分项的权重——AI 人格系统靠这个实现"棋风"：同一套 evaluate()
+    逻辑，换一组权重就是另一种性格（比如把 king_safety 调低、mobility 调高，
+    就是更好斗、更不在乎风险的棋风）。默认值就是上面这五个全局常量，
+    不传就等于以前的行为，完全向后兼容。
+
+    子力价值表（PIECE_VALUES/PROMOTED_PIECE_VALUES）不在这里——那是"一个
+    弩车值多少分"这种客观事实，所有人格共用同一份，不应该因为棋风不同就
+    连基本估值都不一样；会因棋风变化的只是"除了子力还要多看重什么"。
+    """
+    material: float = MATERIAL_WEIGHT
+    king_safety: float = KING_SAFETY_WEIGHT
+    mobility: float = MOBILITY_PER_MOVE
+    center: float = CENTER_WEIGHT
+    tempo: float = TEMPO_BONUS
+
+
+DEFAULT_WEIGHTS = Weights()
 
 
 # ---------------------------------------------------------------------------
@@ -190,22 +212,26 @@ def mobility_score(pos: Position) -> float:
 # 综合
 # ---------------------------------------------------------------------------
 
-def evaluate(pos: Position, side_to_move: int | None = None) -> float:
+def evaluate(pos: Position, side_to_move: int | None = None,
+             weights: Weights = DEFAULT_WEIGHTS) -> float:
     """正数=黑方有利，负数=白方有利。
 
     side_to_move 用于 tempo 加分。搜索过程中 pos.side_to_move 这个字段
     是不更新的（apply_move 只管搬棋子），所以调用方必须显式把当前行棋方
     传进来才能拿到正确的 tempo——不传就当作不加 tempo，行为退化成
     纯静态评估，不会算错，只是少了这一项。
+
+    weights 不传就用 DEFAULT_WEIGHTS（等于以前那几个全局常量），
+    人格系统传一份自定义 Weights 进来就能让同一个引擎表现出不同棋风。
     """
     score = (
-        MATERIAL_WEIGHT * material_score(pos)
-        + KING_SAFETY_WEIGHT * king_safety_score(pos)
-        + MOBILITY_PER_MOVE * mobility_score(pos)
-        + CENTER_WEIGHT * center_control_score(pos)
+        weights.material * material_score(pos)
+        + weights.king_safety * king_safety_score(pos)
+        + weights.mobility * mobility_score(pos)
+        + weights.center * center_control_score(pos)
     )
     if side_to_move is not None:
-        score += TEMPO_BONUS if side_to_move == BLACK else -TEMPO_BONUS
+        score += weights.tempo if side_to_move == BLACK else -weights.tempo
     return score
 
 

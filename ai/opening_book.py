@@ -55,6 +55,9 @@ OPENINGS = [
     {"name": "起马局",     "gambit": False, "weight": 1.2, "moves": ["Ne3", "Ng3"]},
     {"name": "现代起马局", "gambit": False, "weight": 1.2, "moves": ["Nc3", "Nj3"]},
     {"name": "幻想开局",   "gambit": False, "weight": 1.2, "moves": ["Pa3", "Pl3"]},
+    # Kanderson 的准备里提到了"激进进马局 1.Ng4"，之前的18个开局里没有，
+    # 补进来（h1马跳g4，镜像j4）。
+    {"name": "激进进马局", "gambit": False, "weight": 1.2, "moves": ["Ng4"]},
     {"name": "剑阁开局",   "gambit": False, "weight": 1.2,
      "moves": ["Sc3", "See3", "Sge3", "Sgg3", "Sj3"]},
     {"name": "振枢开局",   "gambit": False, "weight": 1.2, "moves": ["Af3"]},
@@ -69,6 +72,11 @@ OPENINGS = [
     # 才能攒出数据来验证它们到底有多软
     {"name": "弃弩开局",   "gambit": True,  "weight": 0.4, "moves": ["Bxd8", "Bxh8"]},
     {"name": "弃炮开局",   "gambit": True,  "weight": 0.4, "moves": ["Txa8+", "Txl8+"]},
+    # 用户确认的两个新开局：
+    {"name": "安娜格拉斯弃兵", "gambit": True, "weight": 1.2, "moves": ["e7", "g7"]},
+    {"name": "艾薇尔变例", "gambit": False, "weight": 1.2, "moves": ["Tk4", "Pd2"]},
+    # 之前我误判 Tk4/Pd2 不合法（l4炮到k4只是横移1格，c1凤凰到d2只是斜移1格，
+    # 两个都是完全合法的第一步，之前的判断是我的错，不是原始描述有问题）。
 ]
 
 

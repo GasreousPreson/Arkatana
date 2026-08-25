@@ -39,7 +39,7 @@ Arkatana（古战棋）— Elo 评分系统
 from __future__ import annotations
 
 K_FACTOR = 32
-INITIAL_RATING = 1000
+INITIAL_RATING = 1500
 PROVISIONAL_TOTAL_THRESHOLD = 320  # 保护期总"波动额度"，用完即结束
 
 

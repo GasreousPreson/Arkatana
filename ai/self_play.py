@@ -47,7 +47,7 @@ from engine_bridge import (
     get_legal_moves, has_only_throne, is_checkmate, is_threefold_repetition,
     other_side, parse_coord, position_signature, sq_index,
 )
-from search import find_best_move, find_move_distribution
+from search import find_best_move, find_move_distribution, softmax_sample
 import notation_lite as nl
 import opening_book
 
@@ -61,23 +61,8 @@ SIDE_NAME = {BLACK: "black", WHITE: "white"}
 # 温度采样
 # ---------------------------------------------------------------------------
 
-def softmax_sample(candidates, side_to_move: int, temperature: float, rng: random.Random) -> Move:
-    """candidates: list[RootMoveScore]（来自 find_move_distribution，分值是
-    "正数偏向黑方"这套统一约定）。先转换成"对 side_to_move 这一方来说好不好"
-    （越大越好），再做标准的 softmax（减最大值防止数值溢出），按概率抽样。
-    """
-    side_relative = [c.score if side_to_move == BLACK else -c.score for c in candidates]
-    m = max(side_relative)
-    weights = [math.exp((s - m) / temperature) for s in side_relative]
-    total = sum(weights)
-    r = rng.random() * total
-    upto = 0.0
-    for c, w in zip(candidates, weights):
-        upto += w
-        if upto >= r:
-            return c.move
-    return candidates[-1].move  # 浮点误差兜底，理论上走不到这里
-
+# softmax_sample() 现在从 search.py 导入——self_play.py 和 play_service.py
+# （AI 人格系统）需要用同一份实现，不要各写各的、以后改一处漏改另一处。
 
 # ---------------------------------------------------------------------------
 # 单局自对弈

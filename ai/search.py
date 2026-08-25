@@ -19,15 +19,17 @@ minimax + alpha-beta 搜索，给定一个局面和搜索深度，找出（在�
 
 from __future__ import annotations
 
+import math
+import random
 import time
 from typing import Optional
 
 from engine_bridge import (
-    BLACK, EMPTY, Move, PROMOTED, Position, apply_move, generate_side_moves,
+    BLACK, EMPTY, Move, PROMOTED, Position, WHITE, apply_move, generate_side_moves,
     get_legal_moves, has_only_throne, is_checkmate, is_in_check, other_side,
     sq_index,
 )
-from evaluate import evaluate, piece_value
+from evaluate import DEFAULT_WEIGHTS, Weights, evaluate, piece_value
 
 # 杀城/残局的分值，要远大于 evaluate() 正常情况下可能算出的任何组合
 # （子力总和顶天 29*4.9≈142，安全分、活跃性分量级更小，10万分绝对压得住）
@@ -114,7 +116,7 @@ def _legal_captures_ordered(pos: Position, side: int) -> list[tuple[Move, float]
 
 
 def _quiescence(pos: Position, alpha: float, beta: float, side_to_move: int,
-                 nodes: list[int], qdepth: int) -> float:
+                 nodes: list[int], qdepth: int, weights: Weights) -> float:
     """静态搜索（quiescence search）——固定深度搜索最致命的毛病是"地平线效应"：
     深度3的最后一层正好轮到自己走，于是引擎兴高采烈地吃掉一个有保护的子，
     到底了、该评估了，对手的反吃发生在深度之外**根本看不见**，
@@ -131,7 +133,7 @@ def _quiescence(pos: Position, alpha: float, beta: float, side_to_move: int,
     """
     nodes[0] += 1
 
-    stand_pat = evaluate(pos, side_to_move)
+    stand_pat = evaluate(pos, side_to_move, weights)
 
     if qdepth >= QUIESCENCE_MAX_DEPTH:
         return stand_pat
@@ -169,7 +171,7 @@ def _quiescence(pos: Position, alpha: float, beta: float, side_to_move: int,
 
         child = pos.clone()
         apply_move(child, move)
-        val = _quiescence(child, alpha, beta, next_side, nodes, qdepth + 1)
+        val = _quiescence(child, alpha, beta, next_side, nodes, qdepth + 1, weights)
         if maximizing:
             if val > best:
                 best = val
@@ -188,7 +190,7 @@ def _quiescence(pos: Position, alpha: float, beta: float, side_to_move: int,
     return best
 
 
-def _minimax(pos: Position, depth: int, alpha: float, beta: float, side_to_move: int, nodes: list[int]) -> float:
+def _minimax(pos: Position, depth: int, alpha: float, beta: float, side_to_move: int, nodes: list[int], weights: Weights) -> float:
     nodes[0] += 1
 
     done, terminal_val = _terminal_value(pos, side_to_move, depth)
@@ -199,14 +201,14 @@ def _minimax(pos: Position, depth: int, alpha: float, beta: float, side_to_move:
         # 到底了不要直接静态评估——先做静态搜索把还没吃完的兑子链算干净，
         # 否则就会出现"吃了子就到底、看不见对手反吃"的地平线效应
         # （详见 _quiescence 的说明）。
-        return _quiescence(pos, alpha, beta, side_to_move, nodes, 0)
+        return _quiescence(pos, alpha, beta, side_to_move, nodes, 0, weights)
 
     legal = get_legal_moves(pos, side_to_move)
     if not legal:
         # 规则集本身没有覆盖"零合法走法但未被将军"这种边缘情况（29子对29子，
         # 正常对局里全员同时被冻结的概率约等于0），保守返回静态评估分，
         # 不当作必胜/必败处理，避免在从未验证过的边缘状态下给出误导性极端分。
-        return evaluate(pos, side_to_move)
+        return evaluate(pos, side_to_move, weights)
 
     next_side = other_side(side_to_move)
     if side_to_move == BLACK:
@@ -214,7 +216,7 @@ def _minimax(pos: Position, depth: int, alpha: float, beta: float, side_to_move:
         for move in _order_moves(legal):
             child = pos.clone()
             apply_move(child, move)
-            val = _minimax(child, depth - 1, alpha, beta, next_side, nodes)
+            val = _minimax(child, depth - 1, alpha, beta, next_side, nodes, weights)
             if val > best:
                 best = val
             if best > alpha:
@@ -227,7 +229,7 @@ def _minimax(pos: Position, depth: int, alpha: float, beta: float, side_to_move:
         for move in _order_moves(legal):
             child = pos.clone()
             apply_move(child, move)
-            val = _minimax(child, depth - 1, alpha, beta, next_side, nodes)
+            val = _minimax(child, depth - 1, alpha, beta, next_side, nodes, weights)
             if val < best:
                 best = val
             if best < beta:
@@ -245,7 +247,7 @@ class RootMoveScore:
         self.score = score
 
 
-def find_move_distribution(pos: Position, side_to_move: int, depth: int):
+def find_move_distribution(pos: Position, side_to_move: int, depth: int, weights: Weights = DEFAULT_WEIGHTS):
     """根节点每一个合法走法各自的 minimax 分值——self_play.py 靠这个做
     "温度采样"：不是每次都死板地选分数最高的那步，而是按分值转成的概率
     分布抽样，让自对弈开局阶段能走出更多样的变着，不然每盘自对弈的开局都
@@ -285,13 +287,13 @@ def find_move_distribution(pos: Position, side_to_move: int, depth: int):
     for move in _order_moves(legal):
         child = pos.clone()
         apply_move(child, move)
-        val = _minimax(child, depth - 1, float("-inf"), float("inf"), next_side, nodes)
+        val = _minimax(child, depth - 1, float("-inf"), float("inf"), next_side, nodes, weights)
         candidates.append(RootMoveScore(move, val))
 
     return candidates, time.time() - t0
 
 
-def find_best_move(pos: Position, side_to_move: int, depth: int) -> SearchResult:
+def find_best_move(pos: Position, side_to_move: int, depth: int, weights: Weights = DEFAULT_WEIGHTS) -> SearchResult:
     """根节点单独展开（而不是直接调用 _minimax 再反查），方便拿到 best_move 本身，
     也方便未来加迭代加深/根节点专属的走法排序策略。
 
@@ -309,7 +311,7 @@ def find_best_move(pos: Position, side_to_move: int, depth: int) -> SearchResult
 
     legal = get_legal_moves(pos, side_to_move)
     if not legal:
-        return SearchResult(None, evaluate(pos, side_to_move), 1, time.time() - t0)
+        return SearchResult(None, evaluate(pos, side_to_move, weights), 1, time.time() - t0)
 
     next_side = other_side(side_to_move)
     maximizing = side_to_move == BLACK
@@ -320,7 +322,7 @@ def find_best_move(pos: Position, side_to_move: int, depth: int) -> SearchResult
     for move in _order_moves(legal):
         child = pos.clone()
         apply_move(child, move)
-        val = _minimax(child, depth - 1, alpha, beta, next_side, nodes)
+        val = _minimax(child, depth - 1, alpha, beta, next_side, nodes, weights)
         if maximizing and (best_move is None or val > best_val):
             best_val, best_move = val, move
             alpha = max(alpha, val)
@@ -329,6 +331,112 @@ def find_best_move(pos: Position, side_to_move: int, depth: int) -> SearchResult
             beta = min(beta, val)
 
     return SearchResult(best_move, best_val, nodes[0], time.time() - t0)
+
+
+def softmax_sample(candidates: list[RootMoveScore], side_to_move: int,
+                    temperature: float, rng: random.Random) -> Move:
+    """candidates 是 find_move_distribution() 返回的"正数偏向黑方"这套统一
+    分值。先转成"对 side_to_move 这一方来说好不好"（越大越好），再做标准
+    softmax（减最大值防止数值溢出），按概率抽样。temperature 趋近0时
+    退化成确定性地选最优招。"""
+    side_relative = [c.score if side_to_move == BLACK else -c.score for c in candidates]
+    m = max(side_relative)
+    weights_ = [math.exp((v - m) / temperature) for v in side_relative]
+    total = sum(weights_)
+    r = rng.random() * total
+    upto = 0.0
+    for c, w in zip(candidates, weights_):
+        upto += w
+        if upto >= r:
+            return c.move
+    return candidates[-1].move  # 浮点误差兜底
+
+
+def _precision_to_temperature(precision: float) -> float:
+    """精度(0~1) -> softmax 温度。精度越低，温度越高、走法越随机。
+    这个映射系数（3.0）是拍出来的初始值，不是标定过的——人格棋力/棋风
+    的真正打磨要靠后面自对弈+人工评估去调，这里先给一个"精度越低越飘"
+    的合理形状，具体数值随时可改，不影响任何调用方的接口。"""
+    return max(0.0, (1.0 - precision)) * 3.0
+
+
+def _aggressiveness_key(pos: Position, candidate: RootMoveScore, side: int):
+    """"更冒险"的简化代理指标，用于 Kanderson 那种"最优解不唯一时偏爱冒险
+    招法"的人格特质——目前用"是不是吃子"和"扎进对方阵营多深"两个信号
+    近似，不是什么严谨的风险度量，就是个可解释、能跑起来的第一版，
+    以后想要更细致的判断（比如"是不是弃子换攻势"）可以在这里单独加。"""
+    m = candidate.move
+    depth_into_enemy = m.to_sq[1] if side == BLACK else (13 - m.to_sq[1])
+    return (1 if m.is_capture else 0, depth_into_enemy)
+
+
+def find_persona_move(pos: Position, side_to_move: int, depth: int,
+                       weights: Weights = DEFAULT_WEIGHTS, precision: float = 1.0,
+                       prefer_aggressive_ties: bool = False, tie_epsilon: float = 0.05,
+                       aggressive_pool_size: int = 5,
+                       rng: Optional[random.Random] = None) -> SearchResult:
+    """给 AI 人格系统用的统一出招入口。
+
+    第一版有个真实的设计漏洞，这里改掉了：之前只有 precision 恰好等于1.0
+    的时候，prefer_aggressive_ties 才会生效——一旦 precision<1.0（比如
+    Kanderson 后来定成0.95），代码会直接走温度采样那条路，"偏爱冒险"这个
+    人格特质就完全不起作用了，等于白设。现在改成 precision 和
+    prefer_aggressive_ties 两个维度互相独立、可以同时生效：
+
+        precision=1.0 且 prefer_aggressive_ties=False（Gasparret/Ananta/
+        Maggeritta 这类"无风格/纯计算"人格）
+            -> 直接走 find_best_move 的快速路径，不额外付任何代价。
+
+        其余所有组合，都先算出全部候选的真实分值（find_move_distribution，
+        比快速路径慢，是这类人格必须付出的代价），然后：
+          1. 以 precision 的概率"选最优"：如果同时 prefer_aggressive_ties，
+             在并列最优（分差在 tie_epsilon 内）的候选里挑更冒险的那个；
+             不并列就是唯一的最优解，没什么好挑的。
+          2. 以 (1-precision) 的概率"偏离最优"：
+             - prefer_aggressive_ties=True 时（Kanderson/Anaxagoras）：
+               不是随便乱走，是从排名靠前的一小撮候选（前 aggressive_pool_size
+               个）里挑最冒险的那个——即使不是最优解，也不会是随便选的烂棋，
+               这才对应"喜欢冒险但不至于送子"的描述。
+             - prefer_aggressive_ties=False 时（Flannery/Karspeirsky/Avril/
+               Sangomanti 这类"精度没那么高但没有冒险偏好"的人格）：
+               普通的温度采样，精度越低温度越高。
+    """
+    rng = rng or random.Random()
+
+    if precision >= 0.999 and not prefer_aggressive_ties:
+        return find_best_move(pos, side_to_move, depth, weights)
+
+    candidates, elapsed = find_move_distribution(pos, side_to_move, depth, weights)
+    if not candidates:
+        # 终局/无子可走——find_best_move 走同一段边缘情况处理逻辑，直接借用
+        return find_best_move(pos, side_to_move, depth, weights)
+
+    maximizing = side_to_move == BLACK
+    ranked = sorted(candidates, key=lambda c: c.score, reverse=maximizing)
+    best_score = ranked[0].score
+
+    take_best = (precision >= 0.999) or (rng.random() < precision)
+
+    if take_best:
+        near_best = [c for c in ranked if abs(c.score - best_score) <= tie_epsilon]
+        chosen = _pick_most_aggressive(pos, near_best, side_to_move) if (
+            prefer_aggressive_ties and len(near_best) > 1
+        ) else near_best[0]
+        return SearchResult(chosen.move, chosen.score, len(candidates), elapsed)
+
+    if prefer_aggressive_ties:
+        pool = ranked[:min(aggressive_pool_size, len(ranked))]
+        chosen = _pick_most_aggressive(pos, pool, side_to_move)
+        return SearchResult(chosen.move, chosen.score, len(candidates), elapsed)
+
+    temperature = _precision_to_temperature(precision)
+    chosen_move = softmax_sample(candidates, side_to_move, temperature, rng)
+    chosen_score = next(c.score for c in candidates if c.move == chosen_move)
+    return SearchResult(chosen_move, chosen_score, len(candidates), elapsed)
+
+
+def _pick_most_aggressive(pos: Position, candidates: list[RootMoveScore], side: int) -> RootMoveScore:
+    return max(candidates, key=lambda c: _aggressiveness_key(pos, c, side))
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ import random
 
 import engine_bridge as eb
 import opening_book
-from search import SearchResult, find_best_move
+from search import SearchResult, find_best_move, find_persona_move
 
 # 难度 -> 搜索深度。深度2目前稳定在1秒以内，深度3中局约7秒（开局最慢约
 # 30秒）——具体数字见 ai/README.md 的性能记录。三档先按这个来，
@@ -113,6 +113,43 @@ def _is_initial_position(pos: eb.Position) -> bool:
     直接跟标准初始摆位逐格比对，比数步数可靠——不依赖调用方传步数进来。"""
     initial = eb.Position.initial()
     return pos.types == initial.types and pos.sides == initial.sides
+
+
+def choose_persona_move(board, side_to_move, persona_key: str,
+                         rng: "random.Random | None" = None) -> SearchResult:
+    """给"AI 人格"系统用的出招入口（区别于上面 choose_ai_move 那个给
+    Play against AI 难度选择器用的）——同样是纯 CPU 密集型同步函数，
+    调用方一样必须用 run_in_threadpool() 包一层。
+
+    第一步棋查这个人格自己的开局偏好表（personas.py 里的 opening_only，
+    None 就是完整开局库）；之后每一步都用 search.find_persona_move()，
+    这个人格的 weights/precision/prefer_aggressive_ties 全部生效。
+
+    ⚠️ 目前还没接深度开局准备树（opening_prep.py 的 PrepNode/BookWalker）——
+    Kanderson/Anaxagoras 这些有过"如果对手...那么..."准备的人格暂时只有
+    第一步的开局库权重在生效，后续几步已经是正常搜索，不是按人工准备走的
+    （personas.py 顶部的说明写了原因：那些密集记谱文本有几处读法拿不准，
+    没有贸然编码）。等 DSL 重新录入、opening_prep.py 接上之后，这个函数
+    需要跟着改成"先问 BookWalker 有没有准备，没有才退回搜索"，接口已经
+    设计好了，到时候只改这一个函数内部，不影响调用方。
+    """
+    from personas import get_persona
+
+    persona = get_persona(persona_key)
+    pos = authoritative_board_to_position(board, side_to_move)
+    side = _side_to_bridge(side_to_move)
+
+    if _is_initial_position(pos):
+        move, name, notation = opening_book.pick_opening_move(
+            side, rng, only_names=persona.opening_only
+        )
+        return SearchResult(move, 0.0, 1, 0.0)
+
+    return find_persona_move(
+        pos, side, persona.depth, weights=persona.weights,
+        precision=persona.precision, prefer_aggressive_ties=persona.prefer_aggressive_ties,
+        rng=rng,
+    )
 
 
 if __name__ == "__main__":
