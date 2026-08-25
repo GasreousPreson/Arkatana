@@ -21,7 +21,11 @@
   "use strict";
 
   const COLS = "abcdefghjkl";
-  const BASE = "pieces/";
+  // 素材目录。默认 "pieces/"（相对于页面所在目录），跟以前完全一样。
+  // 页面可以在加载本脚本**之前**设置 window.ARKATANA_PIECES_BASE 来覆盖它——
+  // ai/explorer.html 那个本地查看器不在 frontend/ 目录下，需要指到
+  // "../frontend/pieces/" 才能找到素材，就是靠这个。
+  const BASE = (global.ARKATANA_PIECES_BASE || "pieces/");
 
   // 记谱字母 -> 素材名里的棋子名
   const PIECE_FILES = {

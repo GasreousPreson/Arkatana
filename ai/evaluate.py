@@ -1,58 +1,54 @@
 """
 ai/evaluate.py
 ===============
-局面评估函数：给一个局面打一个分数，正数代表黑方（先手）有利，负数代表白方
-有利，单位大致对齐"一个兵的价值=1.0分"，方便直觉理解。
+局面评估函数：给一个局面打分，正数=黑方(先手)有利，负数=白方有利，
+单位大致对齐"一个兵=1.0分"。
 
-三块独立打分，加权求和：
-    1. 子力分 material_score      —— 双方棋子价值表之差
-    2. 王城安全分 king_safety_score —— 被将军/护卫棋子/开放线路
-    3. 活跃性分 mobility_score     —— 双方"几何上可行"的走法数量之差
+设计思路（2026-08 改版，参考 Stockfish 那一套的组织方式）：
+    旧版本用的是"王城安全 > 活跃性 > 子力"这种硬性优先级，实战暴露出很严重的
+    问题——AI 一旦脱谱或者处于劣势，就会疯狂用弩车/炮塔换一步"看起来在进攻"
+    的棋（Txa8+、Bxd4 这类），本质上是拿4分的大子去换1分的兵。
 
-按你的要求，子力分只是三项之一，不能让它自动占主导——王城安全 > 活跃性 >
-子力，具体权重（KING_SAFETY_WEIGHT / MOBILITY_WEIGHT）现在是我按经验拍的
-初始值，第5步会用 tune.py 拿自对弈的真实胜负结果去反推更准的权重，
-所以这里的常量往后大概率会变，不用现在就纠结到底准不准。
+    现在改成 Stockfish 的做法：**子力分是评估的主干**（权重1.0，不缩放），
+    其余各项都是在子力这个主干上做小幅修正，各自权重都远小于一个兵：
+        - 王城安全 king_safety：被将军/护卫/开放线，量级控制在半个兵上下
+        - 子力活跃度 mobility：合法走法数量差，每步只值0.02分左右
+        - 中心控制 center_control：越靠近棋盘中央的子越值钱一点点
+        - 先手 tempo：轮到谁走，谁白拿一个很小的加分
+    这样"送一个炮塔换一个兵"在任何情况下都不可能被这些修正项翻盘——
+    4分的差距不是靠零点几分的活跃度/安全分能补回来的。
 
-依赖：ai/engine_bridge.py（不依赖网站后端，纯离线可跑）
+    ⚠️ 但要注意：光改这里**治不好送子**。实测（改版前，深度3，12个真实中局
+    局面）里有 7/12 步棋会白送2分以上的子，而且几乎每一步选的都是吃子——
+    根因是"地平线效应"：深度3的最后一层正好是 AI 自己走，它吃了子就到底了，
+    对手的反吃发生在搜索深度之外，看不见。真正的解药是 search.py 里的
+    静态搜索（quiescence search），评估函数只是配合。两者缺一不可。
+
+依赖：ai/engine_bridge.py（不依赖网站后端）
 """
 
 from __future__ import annotations
 
 from engine_bridge import (
-    ARES, BALLISTA, BLACK, CHARIOT, HUSSAR, KNIGHT, PAWN, PHOENIX, ROOK,
-    STRAIGHT_DIRS, DIAGONAL_DIRS, SWORDSMAN, THRONE, TURRET, WHITE,
-    Position, count_attackers, find_throne, generate_side_moves, is_in_check,
-    is_valid_coord, other_side, sq_index,
+    ARES, BALLISTA, BLACK, CHARIOT, EMPTY, HUSSAR, KNIGHT, MAX_ROW, MIN_ROW,
+    NUM_COLS, PAWN, PHOENIX, PROMOTED, ROOK, STRAIGHT_DIRS, DIAGONAL_DIRS,
+    SWORDSMAN, THRONE, TURRET, WHITE, Position, count_attackers, find_throne,
+    generate_side_moves, index_to_coord, is_in_check, is_valid_coord,
+    other_side, sq_index,
 )
 
 
 # ---------------------------------------------------------------------------
-# 子力价值表（你给的数值，单位=1个兵）
+# 子力价值（用户给定的数值，单位=一个兵）
 # ---------------------------------------------------------------------------
 
 PIECE_VALUES = {
-    PAWN: 1.0,
-    SWORDSMAN: 2.7,
-    BALLISTA: 3.2,
-    HUSSAR: 3.5,
-    CHARIOT: 3.6,
-    TURRET: 4.0,
-    KNIGHT: 4.1,
-    PHOENIX: 4.7,
-    ARES: 4.8,
-    ROOK: 4.9,
-    THRONE: 0.0,   # 王城不计子力分——它的价值体现在 king_safety_score，
-                   # 而且它不会被真正吃掉（杀城判定会提前结束对局）。
+    PAWN: 1.0, SWORDSMAN: 2.7, BALLISTA: 3.2, HUSSAR: 3.5, CHARIOT: 3.6,
+    TURRET: 4.0, KNIGHT: 4.1, PHOENIX: 4.7, ARES: 4.8, ROOK: 4.9,
+    THRONE: 0.0,   # 王城不计子力分，价值体现在 king_safety
 }
 
-# 升变后价值有变化的四种棋子（其余棋子不受 promoted 影响）
-PROMOTED_PIECE_VALUES = {
-    PAWN: 1.5,
-    SWORDSMAN: 3.5,
-    CHARIOT: 4.3,
-    TURRET: 4.4,
-}
+PROMOTED_PIECE_VALUES = {PAWN: 1.5, SWORDSMAN: 3.5, CHARIOT: 4.3, TURRET: 4.4}
 
 
 def piece_value(piece_type: int, promoted: bool) -> float:
@@ -62,14 +58,16 @@ def piece_value(piece_type: int, promoted: bool) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 三项权重（第5步 texel tuning 会替换成学出来的值，这里先手写一版合理初始值）
+# 权重：子力=1.0 是主干，其余都是小幅修正项
 # ---------------------------------------------------------------------------
 
 MATERIAL_WEIGHT = 1.0
-MOBILITY_WEIGHT = 0.04     # 每多1步"几何上可行"的走法 = 0.04分，
-                           # 100步差距 ≈ 4分，量级上跟丢一个大子相当
-KING_SAFETY_WEIGHT = 1.0   # king_safety_score 自身的量级已经调到跟丢子相当，
-                           # 这里不再额外放大
+KING_SAFETY_WEIGHT = 0.55     # 整体量级压到"半个兵"上下，不再压过子力
+MOBILITY_PER_MOVE = 0.02      # 每多一步合法走法值0.02分：50步的巨大差距≈1个兵
+CENTER_WEIGHT = 0.06          # 每个子的中心加成上限约0.06分，纯粹是"同等条件下
+                              # 优先往中间走"的轻微倾向，不足以驱动任何弃子
+TEMPO_BONUS = 0.15            # 轮到谁走谁白拿一点点，避免评估在偶数/奇数深度
+                              # 之间来回跳（Stockfish 的 tempo 也是这个作用）
 
 
 # ---------------------------------------------------------------------------
@@ -77,46 +75,73 @@ KING_SAFETY_WEIGHT = 1.0   # king_safety_score 自身的量级已经调到跟丢
 # ---------------------------------------------------------------------------
 
 def material_score(pos: Position) -> float:
-    """返回 (黑方子力总值 - 白方子力总值)。"""
     total = 0.0
-    for idx in range(len(pos.types)):
-        t = pos.types[idx]
-        if t == 0:  # EMPTY
+    types, sides, flags = pos.types, pos.sides, pos.flags
+    for idx in range(len(types)):
+        t = types[idx]
+        if t == EMPTY:
             continue
-        value = piece_value(t, bool(pos.flags[idx] & 2))  # 2 == PROMOTED flag
-        total += value if pos.sides[idx] == BLACK else -value
+        value = piece_value(t, bool(flags[idx] & PROMOTED))
+        total += value if sides[idx] == BLACK else -value
     return total
 
 
 # ---------------------------------------------------------------------------
-# 王城安全分
+# 中心控制
 # ---------------------------------------------------------------------------
 
-_KING_RING_DIRS = STRAIGHT_DIRS + DIAGONAL_DIRS  # 王城周围8个相邻格
+_CENTER_COL = (NUM_COLS - 1) / 2.0          # 5.0
+_CENTER_ROW = (MIN_ROW + MAX_ROW) / 2.0      # 6.5
+_MAX_CENTER_DIST = _CENTER_COL + (MAX_ROW - _CENTER_ROW)
 
-# 检查开放线路时往外看几格：太近了看不出"这条线是不是空的"，
-# 太远了每步都算代价又太高，4格是射程最长的几个棋子（弩/炮/大将等）
-# 常见有效距离，够用又不至于太慢。
+# 预计算每个格子的"中心度"（0~1，越靠中间越接近1），避免每次评估都重算
+_CENTER_TABLE = []
+for _idx in range(NUM_COLS * (MAX_ROW - MIN_ROW + 1)):
+    _c, _r = index_to_coord(_idx)
+    _dist = abs(_c - _CENTER_COL) + abs(_r - _CENTER_ROW)
+    _CENTER_TABLE.append(1.0 - (_dist / _MAX_CENTER_DIST))
+
+
+def center_control_score(pos: Position) -> float:
+    """越靠近棋盘中央的棋子稍微值钱一点。王城不参与（它本来就不该往中间跑，
+    而且它根本不能移动）；兵也不参与（兵的"该往哪走"由升变排决定，
+    不是往中间挤）。"""
+    total = 0.0
+    types, sides = pos.types, pos.sides
+    for idx in range(len(types)):
+        t = types[idx]
+        if t == EMPTY or t == THRONE or t == PAWN:
+            continue
+        v = _CENTER_TABLE[idx]
+        total += v if sides[idx] == BLACK else -v
+    return total
+
+
+# ---------------------------------------------------------------------------
+# 王城安全
+# ---------------------------------------------------------------------------
+
+_KING_RING_DIRS = STRAIGHT_DIRS + DIAGONAL_DIRS
 _OPEN_LINE_SCAN_DEPTH = 4
 
 
 def _king_safety_one_side(pos: Position, side: int) -> float:
     throne = find_throne(pos, side)
     if throne is None:
-        # 正常局面不会发生（王城被杀城的瞬间对局就结束了，不会真的从棋盘消失），
-        # 但评估函数要对"万一发生"这种异常输入保持健壮，给个中性分而不是崩溃。
         return 0.0
 
     score = 0.0
     enemy = other_side(side)
 
-    # 1) 是否正被将军——这是最直接、最重的信号
+    # 1) 正在被将军。注意这一项的量级：旧版本给到 -4.0（等于一个炮塔！），
+    #    直接导致 AI 愿意送掉大子去换对方一步将军。现在压到 -1.2，
+    #    "将一步"再也换不来一个大子。真正的杀棋不靠这里加分——
+    #    search.py 里杀城/将死本来就是 ±100000 的绝对分，压得住一切。
     if is_in_check(pos, side):
-        score -= 4.0
-        # 被攻击的棋子数量（"双将"比"单将"更危险，即便还没到杀城的地步）
-        score -= 1.5 * max(0, count_attackers(pos, side) - 1)
+        score -= 1.2
+        score -= 0.5 * max(0, count_attackers(pos, side) - 1)
 
-    # 2) 护卫密度：王城周围8格，己方棋子占的比例越高越安全
+    # 2) 护卫密度：王城周围8格里己方棋子占比
     tx, ty = throne
     shield = 0
     ring_squares = 0
@@ -126,68 +151,82 @@ def _king_safety_one_side(pos: Position, side: int) -> float:
             continue
         ring_squares += 1
         idx = sq_index(*dest)
-        if pos.types[idx] != 0 and pos.sides[idx] == side:
+        if pos.types[idx] != EMPTY and pos.sides[idx] == side:
             shield += 1
     if ring_squares > 0:
-        score += 1.2 * (shield / ring_squares)
+        score += 0.8 * (shield / ring_squares)
 
-    # 3) 开放线路：从王城出发8个方向，往外看几格，
-    #    如果这条线上最近的棋子是敌方棋子（没有己方棋子先挡住），
-    #    按距离给递减的扣分——离得越近威胁越大。
+    # 3) 开放线路：王城8个方向往外看，最近的那颗子如果是敌方的，按距离扣分
     for dx, dy in _KING_RING_DIRS:
         for dist in range(1, _OPEN_LINE_SCAN_DEPTH + 1):
             dest = (tx + dx * dist, ty + dy * dist)
             if not is_valid_coord(*dest):
                 break
             idx = sq_index(*dest)
-            if pos.types[idx] == 0:
+            if pos.types[idx] == EMPTY:
                 continue
             if pos.sides[idx] == enemy:
-                score -= 0.5 * (_OPEN_LINE_SCAN_DEPTH + 1 - dist) / _OPEN_LINE_SCAN_DEPTH
-            break  # 不管敌我，这条线上第一个挡住的棋子决定了这条线的评价
+                score -= 0.35 * (_OPEN_LINE_SCAN_DEPTH + 1 - dist) / _OPEN_LINE_SCAN_DEPTH
+            break
 
     return score
 
 
 def king_safety_score(pos: Position) -> float:
-    """返回 (黑方王城安全分 - 白方王城安全分)。"""
     return _king_safety_one_side(pos, BLACK) - _king_safety_one_side(pos, WHITE)
 
 
 # ---------------------------------------------------------------------------
-# 活跃性分（用伪合法走法数量，不做"是否送将"的过滤——那个代价太高，
-# 而且活跃性本来就只是个粗略的"这些棋子有多少种可能性"信号，不需要精确）
+# 活跃度
 # ---------------------------------------------------------------------------
 
 def mobility_score(pos: Position) -> float:
-    black_moves = len(generate_side_moves(pos, BLACK))
-    white_moves = len(generate_side_moves(pos, WHITE))
-    return float(black_moves - white_moves)
+    """用伪合法走法数量之差（不过滤送将，那个代价太高，
+    活跃度本来就是个粗略信号，不需要精确）。"""
+    return float(len(generate_side_moves(pos, BLACK)) - len(generate_side_moves(pos, WHITE)))
 
 
 # ---------------------------------------------------------------------------
-# 综合评估
+# 综合
 # ---------------------------------------------------------------------------
 
-def evaluate(pos: Position) -> float:
-    """正数=黑方(先手)有利，负数=白方有利。"""
-    return (
+def evaluate(pos: Position, side_to_move: int | None = None) -> float:
+    """正数=黑方有利，负数=白方有利。
+
+    side_to_move 用于 tempo 加分。搜索过程中 pos.side_to_move 这个字段
+    是不更新的（apply_move 只管搬棋子），所以调用方必须显式把当前行棋方
+    传进来才能拿到正确的 tempo——不传就当作不加 tempo，行为退化成
+    纯静态评估，不会算错，只是少了这一项。
+    """
+    score = (
         MATERIAL_WEIGHT * material_score(pos)
         + KING_SAFETY_WEIGHT * king_safety_score(pos)
-        + MOBILITY_WEIGHT * mobility_score(pos)
+        + MOBILITY_PER_MOVE * mobility_score(pos)
+        + CENTER_WEIGHT * center_control_score(pos)
     )
+    if side_to_move is not None:
+        score += TEMPO_BONUS if side_to_move == BLACK else -TEMPO_BONUS
+    return score
 
 
 if __name__ == "__main__":
-    pos = Position.initial()
-    print("开局评估分（理论上应接近0，双方完全对称）:", evaluate(pos))
-    assert abs(evaluate(pos)) < 1e-9, "开局是完全对称局面，评估分必须恰好为0"
-
-    # 简单单元检查：黑方多一个兵，评估分应该明显偏向黑方
-    pos2 = pos.clone()
-    # 拿掉白方一个兵（h8）
     from engine_bridge import parse_coord
-    pos2.clear(parse_coord("h8"))
-    assert evaluate(pos2) > 0.5, "白方少一个兵，评估分应该明显偏向黑方"
+
+    pos = Position.initial()
+    base = evaluate(pos)
+    print("开局评估分（不含tempo，双方完全对称，应为0）:", round(base, 6))
+    assert abs(base) < 1e-9, "开局是完全对称局面，不含tempo时评估分必须恰好为0"
+
+    with_tempo = evaluate(pos, BLACK)
+    assert abs(with_tempo - TEMPO_BONUS) < 1e-9, "黑方走棋应该拿到 tempo 加分"
+
+    # 关键回归测试：拿一个炮塔换一个兵，任何情况下都必须是明确的坏交易——
+    # 这正是旧版本评估函数会做的蠢事（王城安全项权重过大导致的）
+    p2 = Position.initial()
+    p2.clear(parse_coord("a4"))    # 黑方失去一个炮塔(4.0)
+    p2.clear(parse_coord("a8"))    # 白方失去一个兵(1.0)
+    delta = evaluate(p2) - base
+    print(f"用炮塔(4.0)换兵(1.0)的评估变化: {delta:+.2f}（必须明显为负）")
+    assert delta < -2.0, f"炮塔换兵必须是明确的坏交易，实际只有 {delta:+.2f}"
 
     print("evaluate.py 冒烟测试通过 ✅")

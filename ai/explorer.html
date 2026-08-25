@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Arkatana AI 本地查看器</title>
+<style>
+  :root {
+    --bg: #17140f; --panel: #221d16; --panel2: #2a241a; --gold: #c9a24b;
+    --gold-dim: #8a7238; --ink: #e9e0c8; --ink-dim: #a89a78; --line: #3a3223;
+    --dark-sq: #6b5b3a; --light-sq: #d9cba3; --black-chip: #1c1712; --white-chip: #ece3c9;
+    --win-black: #7bb661; --win-white: #d9cba3; --draw: #706352; --danger: #c95b4d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif; }
+  .topbar { display: flex; align-items: center; gap: 24px; padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .topbar h1 { font-size: 18px; margin: 0; color: var(--gold); white-space: nowrap; }
+  .tabs { display: flex; gap: 8px; }
+  .tab-btn { background: var(--panel2); color: var(--ink-dim); border: 1px solid var(--line); border-radius: 4px; padding: 8px 16px; cursor: pointer; font-size: 14px; }
+  .tab-btn.active { background: var(--gold); color: #23200f; border-color: var(--gold); font-weight: 600; }
+  #data-status { margin-left: auto; font-size: 12px; color: var(--ink-dim); }
+
+  .view { padding: 18px; }
+
+  /* ---------------- 棋盘 ---------------- */
+  .board { display: grid; grid-template-columns: repeat(11, 38px); grid-template-rows: repeat(12, 38px); border: 2px solid var(--line); width: max-content; }
+  .sq { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; position: relative; }
+  .sq.light { background: var(--light-sq); }
+  .sq.dark { background: var(--dark-sq); }
+  .chip { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; user-select: none; }
+  .chip.black { background: var(--black-chip); color: #e9e0c8; border: 1px solid #4a4030; }
+  .chip.white { background: var(--white-chip); color: #23200f; border: 1px solid #8a7238; }
+  .chip.promoted { box-shadow: 0 0 0 2px var(--gold) inset; }
+  .board-wrap { display: inline-block; }
+
+  /* ---------------- 对局库 ---------------- */
+  .games-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .games-list-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-width: 420px; flex: 1; }
+  .filters { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .filters select, .filters input { background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font-size: 13px; }
+  table.games-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.games-table th { text-align: left; color: var(--gold-dim); border-bottom: 1px solid var(--line); padding: 6px 8px; }
+  table.games-table td { padding: 6px 8px; border-bottom: 1px solid #2a2418; cursor: pointer; }
+  table.games-table tr:hover td { background: var(--panel2); }
+  .result-tag { padding: 2px 6px; border-radius: 3px; font-size: 11px; }
+  .result-tag.black_wins { background: #2c3a22; color: var(--win-black); }
+  .result-tag.white_wins { background: #3a3626; color: #efe4bd; }
+  .result-tag.draw_repetition, .result-tag.draw_movecap, .result-tag.draw_no_moves { background: #302c22; color: var(--draw); }
+
+  /* ---------------- 对局界面 ---------------- */
+  .replay-top { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; flex-wrap: wrap; }
+  .back-btn { background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
+  .back-btn:hover { border-color: var(--gold); color: var(--gold); }
+  .replay-meta { font-size: 13px; color: var(--ink-dim); }
+  .replay-meta b { color: var(--ink); font-weight: 600; }
+  .replay-layout { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
+  #replay-canvas { border: 2px solid var(--line); border-radius: 4px; display: block; }
+  .replay-side { min-width: 260px; flex: 1; }
+  .replay-controls { display: flex; gap: 6px; margin: 12px 0 6px; align-items: center; }
+  .replay-controls button { background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 7px 14px; cursor: pointer; font-size: 14px; }
+  .replay-controls button:hover { border-color: var(--gold-dim); }
+  .ply-label { margin-left: 8px; color: var(--ink-dim); font-size: 13px; }
+  .kbd-hint { font-size: 12px; color: var(--ink-dim); }
+  .move-list { max-height: 520px; overflow-y: auto; font-size: 13px; background: var(--panel2); border-radius: 4px; padding: 8px; }
+  .move-list .row { display: grid; grid-template-columns: 36px 1fr 1fr; gap: 6px; padding: 3px 4px; border-radius: 3px; cursor: pointer; }
+  .move-list .row:hover { background: #352f21; }
+  .move-list .row.current-black span:nth-child(2), .move-list .row.current-white span:nth-child(3) { background: var(--gold); color: #23200f; border-radius: 3px; padding: 0 4px; }
+  .move-list .num { color: var(--ink-dim); }
+  .close-replay { float: right; background: none; border: none; color: var(--ink-dim); cursor: pointer; font-size: 16px; }
+
+  /* ---------------- 开局浏览器 ---------------- */
+  .explorer-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .explorer-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-width: 420px; flex: 1; }
+  .breadcrumb { font-size: 13px; margin-bottom: 10px; color: var(--ink-dim); }
+  .breadcrumb .crumb { color: var(--gold); cursor: pointer; }
+  .breadcrumb .crumb:hover { text-decoration: underline; }
+  .side-hint { font-size: 12px; color: var(--ink-dim); margin-bottom: 8px; }
+  .move-stat-row { padding: 8px; border-radius: 4px; cursor: pointer; margin-bottom: 6px; background: var(--panel2); }
+  .move-stat-row:hover { outline: 1px solid var(--gold-dim); }
+  .move-stat-top { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px; }
+  .move-stat-top .notation { font-weight: 700; color: var(--ink); }
+  .move-stat-top .games-count { color: var(--ink-dim); }
+  .bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #221d16; }
+  .bar .seg-black { background: var(--win-black); }
+  .bar .seg-draw { background: var(--draw); }
+  .bar .seg-white { background: var(--win-white); }
+  .stat-legend { font-size: 11px; color: var(--ink-dim); margin-top: 3px; }
+  .empty-msg { color: var(--ink-dim); font-size: 14px; padding: 30px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>🏯 Arkatana AI 本地查看器</h1>
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-games">对局库</button>
+    <button class="tab-btn" id="tab-explorer">开局浏览器</button>
+  </div>
+  <div id="data-status"></div>
+</div>
+
+<div class="view" id="view-games">
+  <div class="games-list-panel">
+    <div class="filters">
+      <select id="filter-result">
+        <option value="">全部结果</option>
+        <option value="black_wins">黑胜</option>
+        <option value="white_wins">白胜</option>
+        <option value="draw">和棋</option>
+      </select>
+      <select id="filter-opening">
+        <option value="">全部开局</option>
+      </select>
+    </div>
+    <table class="games-table">
+      <thead><tr><th>时间</th><th>结果</th><th>步数</th><th>深度</th><th>开局</th></tr></thead>
+      <tbody id="games-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 对局界面：点开一局之后整页切换到这里（跟网站 database 点进对局是同一个交互） -->
+<div class="view" id="view-replay" style="display:none;">
+  <div class="replay-top">
+    <button class="back-btn" id="replay-back">← 返回对局库</button>
+    <div class="replay-meta" id="replay-meta"></div>
+  </div>
+  <div class="replay-layout">
+    <div>
+      <canvas id="replay-canvas"></canvas>
+      <div class="replay-controls">
+        <button id="replay-first" title="回到开局">|◀</button>
+        <button id="replay-prev" title="上一步（←）">◀</button>
+        <button id="replay-next" title="下一步（→）">▶</button>
+        <button id="replay-last" title="跳到终局">▶|</button>
+        <span class="ply-label" id="replay-ply-label"></span>
+      </div>
+      <div class="kbd-hint">提示：按键盘 ← → 可以逐步播放</div>
+    </div>
+    <div class="replay-side">
+      <div class="move-list" id="replay-movelist"></div>
+    </div>
+  </div>
+</div>
+
+<div class="view" id="view-explorer" style="display:none;">
+  <div class="explorer-layout">
+    <div class="board-wrap"><div class="board" id="explorer-board"></div></div>
+    <div class="explorer-panel">
+      <div class="breadcrumb" id="explorer-breadcrumb"></div>
+      <div class="side-hint" id="explorer-side-hint"></div>
+      <div id="explorer-movelist"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // 必须在加载 pieces.js **之前**设置：这个查看器在 ai/ 目录下，
+  // 而棋子素材在 frontend/pieces/ 下，需要把素材目录指过去。
+  window.ARKATANA_PIECES_BASE = "../frontend/pieces/";
+</script>
+<script src="../frontend/pieces.js"></script>
+<script src="viewer_data.js"></script>
+<script>
+(() => {
+  "use strict";
+
+  // -------------------------------------------------------------------
+  // 数据 / 常量
+  // -------------------------------------------------------------------
+  const DATA = window.ARKATANA_VIEWER_DATA || null;
+  const COLUMNS = "abcdefghjkl";
+  const NUM_COLS = 11, MIN_ROW = 1, MAX_ROW = 12;
+
+  const PIECE_LABEL = {
+    "兵": "兵", "弩车": "弩", "炮塔": "炮", "大将": "将", "轻骑士": "轻",
+    "重骑士": "重", "攻城塔": "城", "凤凰": "凤", "剑士": "剑", "战车": "战", "王城": "王",
+  };
+
+  const RESULT_LABEL = {
+    black_wins: "黑胜", white_wins: "白胜",
+    draw_repetition: "和(重复)", draw_movecap: "和(步数上限)", draw_no_moves: "和(无棋可走)",
+  };
+
+  function colIndex(letter) { return COLUMNS.indexOf(letter); }
+
+  function initialBoard() {
+    const board = {};
+    const place = (coords, type, side) => coords.forEach((c) => { board[c] = { type, side, promoted: false }; });
+    const pawnsRow = (row) => COLUMNS.split("").map((c) => c + row);
+
+    place(["f1"], "王城", "black");
+    place(pawnsRow(5), "兵", "black");
+    place(["f4"], "大将", "black");
+    place(["d4", "h4"], "弩车", "black");
+    place(["a4", "l4"], "炮塔", "black");
+    place(["a1", "l1"], "攻城塔", "black");
+    place(["b1", "k1"], "战车", "black");
+    place(["c1", "j1"], "凤凰", "black");
+    place(["d1", "h1"], "重骑士", "black");
+    place(["e1", "g1"], "剑士", "black");
+    place(["c2", "j2"], "轻骑士", "black");
+
+    place(["f12"], "王城", "white");
+    place(pawnsRow(8), "兵", "white");
+    place(["f9"], "大将", "white");
+    place(["d9", "h9"], "弩车", "white");
+    place(["a9", "l9"], "炮塔", "white");
+    place(["a12", "l12"], "攻城塔", "white");
+    place(["b12", "k12"], "战车", "white");
+    place(["c12", "j12"], "凤凰", "white");
+    place(["d12", "h12"], "重骑士", "white");
+    place(["e12", "g12"], "剑士", "white");
+    place(["c11", "j11"], "轻骑士", "white");
+    return board;
+  }
+
+  /** 只做"傻替换"：挪子/吃子/带上升变状态，不做任何合法性校验——
+   * 这里回放的都是已经在真实对局里走出来过的棋，不需要重新验证一遍规则。*/
+  function applyMoveDumb(board, move) {
+    const wasPromoted = board[move.from] ? board[move.from].promoted : false;
+    board[move.to] = {
+      type: move.piece_type, side: move.side,
+      promoted: wasPromoted || move.promoted,
+    };
+    delete board[move.from];
+  }
+
+  function boardAtPly(moves, ply) {
+    const board = initialBoard();
+    for (let i = 0; i < ply; i++) applyMoveDumb(board, moves[i]);
+    return board;
+  }
+
+  function renderBoard(board, containerEl) {
+    containerEl.innerHTML = "";
+    for (let row = MAX_ROW; row >= MIN_ROW; row--) {
+      for (let col = 0; col < NUM_COLS; col++) {
+        const sq = document.createElement("div");
+        const isLight = (col + row) % 2 === 0;
+        sq.className = "sq " + (isLight ? "light" : "dark");
+        const coord = COLUMNS[col] + row;
+        const piece = board[coord];
+        if (piece) {
+          const chip = document.createElement("div");
+          chip.className = "chip " + piece.side + (piece.promoted ? " promoted" : "");
+          chip.textContent = PIECE_LABEL[piece.type] || piece.type[0] || "?";
+          chip.title = piece.type + (piece.promoted ? "（已升变）" : "") + " · " + (piece.side === "black" ? "黑方" : "白方");
+          sq.appendChild(chip);
+        }
+        containerEl.appendChild(sq);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // 页面骨架 / 无数据兜底
+  // -------------------------------------------------------------------
+  if (!DATA) {
+    document.querySelector(".view").innerHTML =
+      '<div class="empty-msg">没有找到 viewer_data.js 里的数据。<br>先跑 <code>python3 ai/self_play.py --games 20 --depth 3</code> 生成对局，<br>再跑 <code>python3 ai/book_build.py</code> 生成这份数据文件。</div>';
+  } else {
+    document.getElementById("data-status").textContent =
+      `${DATA.games.length} 局 · 生成于 ${DATA.generated_at} · 开局树深度上限 ${DATA.plies_cap} 半步`;
+  }
+
+  // -------------------------------------------------------------------
+  // Tab 切换
+  // -------------------------------------------------------------------
+  const tabGames = document.getElementById("tab-games");
+  const tabExplorer = document.getElementById("tab-explorer");
+  const viewGames = document.getElementById("view-games");
+  const viewExplorer = document.getElementById("view-explorer");
+  const viewReplayEl = document.getElementById("view-replay");
+
+  // 切 tab 时要连对局界面一起收起来——不然在看某一局的时候点"开局浏览器"，
+  // 会出现两个界面同时显示的错乱
+  tabGames.addEventListener("click", () => {
+    tabGames.classList.add("active"); tabExplorer.classList.remove("active");
+    viewReplayEl.style.display = "none";
+    viewGames.style.display = "block"; viewExplorer.style.display = "none";
+  });
+  tabExplorer.addEventListener("click", () => {
+    tabExplorer.classList.add("active"); tabGames.classList.remove("active");
+    viewReplayEl.style.display = "none";
+    viewExplorer.style.display = "block"; viewGames.style.display = "none";
+    if (DATA) renderExplorer();
+  });
+
+  if (!DATA) {
+    // 没有数据时两个 tab 都没意义，禁用掉，避免点了之后一片空白看不出发生了什么
+    tabGames.disabled = true; tabExplorer.disabled = true;
+  }
+
+  // 棋子素材一进页面就开始预加载（而不是等点开某一局才加载）——
+  // 50张图在本地是很快，但如果等到点开对局才开始加载，第一眼会看到
+  // 兜底的圆片然后突然变成棋子造型，观感很差。加载完如果正好有对局
+  // 开着，就重画一次。
+  if (window.ArkatanaPieces && window.ArkatanaPieces.preloadAll) {
+    window.ArkatanaPieces.preloadAll().then(() => {
+      if (typeof window.__arkatanaRedraw === "function") window.__arkatanaRedraw();
+    });
+  }
+
+  // =====================================================================
+  // 对局库
+  // =====================================================================
+  if (DATA) {
+    const tbody = document.getElementById("games-tbody");
+    const filterResult = document.getElementById("filter-result");
+    const filterOpening = document.getElementById("filter-opening");
+
+    const openingTags = [...new Set(DATA.games.map((g) => g.opening_tag).filter(Boolean))];
+    openingTags.forEach((tag) => {
+      const opt = document.createElement("option");
+      opt.value = tag; opt.textContent = tag;
+      filterOpening.appendChild(opt);
+    });
+
+    function matchesFilter(g) {
+      const rf = filterResult.value;
+      if (rf === "black_wins" && g.result !== "black_wins") return false;
+      if (rf === "white_wins" && g.result !== "white_wins") return false;
+      if (rf === "draw" && !g.result.startsWith("draw")) return false;
+      const of = filterOpening.value;
+      if (of && g.opening_tag !== of) return false;
+      return true;
+    }
+
+    function renderGamesTable() {
+      tbody.innerHTML = "";
+      DATA.games.filter(matchesFilter).forEach((g) => {
+        const tr = document.createElement("tr");
+        const dt = g.timestamp ? g.timestamp.replace("T", " ").slice(0, 16) : "?";
+        tr.innerHTML = `
+          <td>${dt}</td>
+          <td><span class="result-tag ${g.result}">${RESULT_LABEL[g.result] || g.result}</span></td>
+          <td>${g.ply_count}</td>
+          <td>${g.depth}</td>
+          <td>${g.opening_tag || "—"}</td>
+        `;
+        tr.addEventListener("click", () => openReplay(g));
+        tbody.appendChild(tr);
+      });
+    }
+    filterResult.addEventListener("change", renderGamesTable);
+    filterOpening.addEventListener("change", renderGamesTable);
+    renderGamesTable();
+
+    // -- 对局界面（canvas + 素材 + 动画 + 键盘←→）-------------------------
+    const viewReplay = document.getElementById("view-replay");
+    const canvas = document.getElementById("replay-canvas");
+    const ctx = canvas.getContext("2d");
+    const replayMovelistEl = document.getElementById("replay-movelist");
+    const replayPlyLabel = document.getElementById("replay-ply-label");
+    const replayMetaEl = document.getElementById("replay-meta");
+
+    const CELL = 46;
+    const PAD = 22;                       // 留给坐标标注的边距
+    const BOARD_W = NUM_COLS * CELL;
+    const BOARD_H = (MAX_ROW - MIN_ROW + 1) * CELL;
+    canvas.width = BOARD_W + PAD;
+    canvas.height = BOARD_H + PAD;
+
+    const SQ_LIGHT = "#e6e4de";           // 跟网站 game.html 的配色保持一致
+    const SQ_DARK = "#c2bdb2";
+    const LABEL_COLOR = "#8a7f6a";
+    const LAST_MOVE_TINT = "rgba(184,148,75,0.35)";
+
+    const ANIM_MS = 190;
+
+    let currentGame = null;
+    let currentPly = 0;
+    let anim = null;                      // {move, startTime, boardBefore}
+    let animRaf = null;
+    // 棋子朝向记忆：素材分左右两版，正中 f 列不翻面而是沿用原朝向
+    // （pieces.js 的 resolveVariant 需要这个），这里按格子记住。
+    let orientationBySquare = {};
+
+    function squareCenter(coord) {
+      const col = COLUMNS.indexOf(coord[0]);
+      const row = parseInt(coord.slice(1), 10);
+      const x = PAD + col * CELL + CELL / 2;
+      const y = (MAX_ROW - row) * CELL + CELL / 2;
+      return [x, y];
+    }
+
+    function drawSquaresAndLabels(lastMove) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (let row = MAX_ROW; row >= MIN_ROW; row--) {
+        for (let col = 0; col < NUM_COLS; col++) {
+          const x = PAD + col * CELL;
+          const y = (MAX_ROW - row) * CELL;
+          ctx.fillStyle = ((col + row) % 2 === 0) ? SQ_LIGHT : SQ_DARK;
+          ctx.fillRect(x, y, CELL, CELL);
+        }
+      }
+      if (lastMove) {
+        [lastMove.from, lastMove.to].forEach((sq) => {
+          const col = COLUMNS.indexOf(sq[0]);
+          const row = parseInt(sq.slice(1), 10);
+          ctx.fillStyle = LAST_MOVE_TINT;
+          ctx.fillRect(PAD + col * CELL, (MAX_ROW - row) * CELL, CELL, CELL);
+        });
+      }
+      ctx.fillStyle = LABEL_COLOR;
+      ctx.font = "11px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (let col = 0; col < NUM_COLS; col++) {
+        ctx.fillText(COLUMNS[col], PAD + col * CELL + CELL / 2, BOARD_H + PAD / 2);
+      }
+      ctx.textAlign = "right";
+      for (let row = MAX_ROW; row >= MIN_ROW; row--) {
+        ctx.fillText(String(row), PAD - 6, (MAX_ROW - row) * CELL + CELL / 2);
+      }
+    }
+
+    const NOTATION_BY_NAME = {
+      "兵": "", "弩车": "B", "炮塔": "T", "大将": "A", "轻骑士": "H",
+      "重骑士": "N", "攻城塔": "R", "凤凰": "P", "剑士": "S", "战车": "C", "王城": "TH",
+    };
+
+    function drawOnePiece(coord, piece, atX, atY) {
+      const P = window.ArkatanaPieces;
+      const notation = NOTATION_BY_NAME[piece.type];
+      let img = null;
+      if (P && notation !== undefined) {
+        img = P.getImage(notation, piece.side, coord, false,
+                          orientationBySquare[coord], piece.promoted);
+        if (img) {
+          const size = CELL * P.pieceScale(notation);
+          ctx.drawImage(img, atX - size / 2, atY - size / 2, size, size);
+          return;
+        }
+      }
+      // 素材没加载出来（比如 frontend/pieces/ 路径不对）时的兜底画法：
+      // 画个带字的圆片，至少还能看懂棋局，不会变成一片空白。
+      ctx.beginPath();
+      ctx.arc(atX, atY, CELL * 0.34, 0, Math.PI * 2);
+      ctx.fillStyle = piece.side === "black" ? "#1c1712" : "#ece3c9";
+      ctx.fill();
+      ctx.strokeStyle = piece.side === "black" ? "#4a4030" : "#8a7238";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = piece.side === "black" ? "#e9e0c8" : "#23200f";
+      ctx.font = "bold 15px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(PIECE_LABEL[piece.type] || "?", atX, atY);
+    }
+
+    function renderFrame() {
+      if (!currentGame) return;
+      const lastMove = currentPly > 0 ? currentGame.moves[currentPly - 1] : null;
+
+      if (anim) {
+        // 动画期间：先画动画开始前的局面（不含正在移动的那颗子和被吃的子），
+        // 再把移动中的棋子画在插值出来的位置上
+        const t = Math.min(1, (performance.now() - anim.startTime) / ANIM_MS);
+        const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;  // easeInOutQuad
+        drawSquaresAndLabels(anim.move);
+        for (const coord in anim.boardBefore) {
+          if (coord === anim.move.from) continue;
+          if (coord === anim.move.to) continue;   // 被吃的子在动画一开始就撤掉
+          const [x, y] = squareCenter(coord);
+          drawOnePiece(coord, anim.boardBefore[coord], x, y);
+        }
+        const [fx, fy] = squareCenter(anim.move.from);
+        const [tx, ty] = squareCenter(anim.move.to);
+        const mover = anim.boardBefore[anim.move.from];
+        if (mover) {
+          drawOnePiece(anim.move.from, mover, fx + (tx - fx) * ease, fy + (ty - fy) * ease);
+        }
+        if (t < 1) {
+          animRaf = requestAnimationFrame(renderFrame);
+          return;
+        }
+        anim = null;
+      }
+
+      const board = boardAtPly(currentGame.moves, currentPly);
+      drawSquaresAndLabels(lastMove);
+      for (const coord in board) {
+        const [x, y] = squareCenter(coord);
+        drawOnePiece(coord, board[coord], x, y);
+      }
+    }
+
+    function gotoPly(newPly, animate) {
+      if (!currentGame) return;
+      newPly = Math.max(0, Math.min(currentGame.moves.length, newPly));
+      if (animRaf) { cancelAnimationFrame(animRaf); animRaf = null; }
+
+      // 只有"往前走一步"才播动画——快退/跳转直接切，不然会很别扭
+      if (animate && newPly === currentPly + 1) {
+        const move = currentGame.moves[currentPly];
+        anim = { move, startTime: performance.now(), boardBefore: boardAtPly(currentGame.moves, currentPly) };
+        // 棋子经过正中 f 列时朝向要沿用旧的，这里把朝向记忆搬到新格子
+        const P = window.ArkatanaPieces;
+        if (P) {
+          const prev = orientationBySquare[move.from];
+          const variant = P.resolveVariant(move.to, false, prev);
+          orientationBySquare[move.to] = variant;
+          delete orientationBySquare[move.from];
+        }
+      }
+      currentPly = newPly;
+      renderFrame();
+      renderMoveListPanel();
+      updatePlyLabel();
+    }
+
+    function updatePlyLabel() {
+      replayPlyLabel.textContent = `第 ${currentPly} / ${currentGame.moves.length} 步` +
+        (currentPly === currentGame.moves.length
+          ? `（终局：${RESULT_LABEL[currentGame.result] || currentGame.result}）` : "");
+    }
+
+    function openReplay(g) {
+      currentGame = g;
+      currentPly = 0;
+      anim = null;
+      orientationBySquare = {};
+      viewGames.style.display = "none";
+      viewExplorer.style.display = "none";
+      viewReplay.style.display = "block";
+      replayMetaEl.innerHTML =
+        `<b>${RESULT_LABEL[g.result] || g.result}</b> · ${g.ply_count} 步 · 深度 ${g.depth}` +
+        (g.opening_tag ? ` · 开局 <b>${g.opening_tag}</b>` : "") +
+        ` · ${g.timestamp ? g.timestamp.replace("T", " ").slice(0, 16) : ""}`;
+      renderMoveListPanel();
+      updatePlyLabel();
+      renderFrame();
+    }
+
+    function closeReplay() {
+      currentGame = null;
+      if (animRaf) { cancelAnimationFrame(animRaf); animRaf = null; }
+      viewReplay.style.display = "none";
+      viewGames.style.display = "block";
+    }
+
+    function renderMoveListPanel() {
+      replayMovelistEl.innerHTML = "";
+      const moves = currentGame.moves;
+      for (let i = 0; i < moves.length; i += 2) {
+        const row = document.createElement("div");
+        row.className = "row";
+        const num = Math.floor(i / 2) + 1;
+        const blackMv = moves[i], whiteMv = moves[i + 1];
+        if (currentPly === i + 1) row.classList.add("current-black");
+        if (whiteMv && currentPly === i + 2) row.classList.add("current-white");
+        row.innerHTML = `<span class="num">${num}.</span><span>${blackMv.notation}</span><span>${whiteMv ? whiteMv.notation : ""}</span>`;
+        row.addEventListener("click", () => gotoPly(whiteMv ? i + 2 : i + 1, false));
+        replayMovelistEl.appendChild(row);
+      }
+      const active = replayMovelistEl.querySelector(".current-black, .current-white");
+      if (active) active.scrollIntoView({ block: "nearest" });
+    }
+
+    document.getElementById("replay-first").addEventListener("click", () => gotoPly(0, false));
+    document.getElementById("replay-prev").addEventListener("click", () => gotoPly(currentPly - 1, false));
+    document.getElementById("replay-next").addEventListener("click", () => gotoPly(currentPly + 1, true));
+    document.getElementById("replay-last").addEventListener("click", () => gotoPly(currentGame.moves.length, false));
+    document.getElementById("replay-back").addEventListener("click", closeReplay);
+
+    // 给页面级的素材预加载留一个重画钩子（素材加载完时如果正好开着某一局，
+    // 把兜底圆片换成真正的棋子造型）
+    window.__arkatanaRedraw = () => { if (currentGame) renderFrame(); };
+
+    document.addEventListener("keydown", (e) => {
+      if (!currentGame || viewReplay.style.display === "none") return;
+      if (e.key === "ArrowRight") { e.preventDefault(); gotoPly(currentPly + 1, true); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); gotoPly(currentPly - 1, false); }
+      else if (e.key === "Home") { e.preventDefault(); gotoPly(0, false); }
+      else if (e.key === "End") { e.preventDefault(); gotoPly(currentGame.moves.length, false); }
+      else if (e.key === "Escape") { e.preventDefault(); closeReplay(); }
+    });
+  }
+
+  // =====================================================================
+  // 开局浏览器
+  // =====================================================================
+  let explorerPrefix = []; // 已经点进去的每一步 move_key（比如 "a1a3"）的数组
+
+  function explorerPrefixKey() { return explorerPrefix.join("|"); }
+
+  function renderExplorer() {
+    const board = initialBoard();
+
+    // 逐层重建每一步的完整走法详情（含 piece_type/promoted，不只是 from/to）：
+    // 从根节点开始，每一步都在"当前节点的候选列表"里找到 move===下一个
+    // move_key 的那一条，取出详情应用到棋盘上，再把这个 move_key 拼进 key
+    // 作为下一层继续查找。
+    let key = "";
+    const path = [];
+    for (const mk of explorerPrefix) {
+      const candidates = DATA.opening_tree[key] || [];
+      const found = candidates.find((c) => c.move === mk);
+      if (!found) break;
+      applyMoveDumb(board, found);
+      path.push(found);
+      key = key ? key + "|" + mk : mk;
+    }
+
+    renderBoard(board, document.getElementById("explorer-board"));
+
+    // 面包屑
+    const crumbEl = document.getElementById("explorer-breadcrumb");
+    crumbEl.innerHTML = "";
+    const rootCrumb = document.createElement("span");
+    rootCrumb.className = "crumb"; rootCrumb.textContent = "开局";
+    rootCrumb.addEventListener("click", () => { explorerPrefix = []; renderExplorer(); });
+    crumbEl.appendChild(rootCrumb);
+    path.forEach((p, i) => {
+      crumbEl.appendChild(document.createTextNode(" → "));
+      const c = document.createElement("span");
+      c.className = "crumb"; c.textContent = p.notation;
+      c.addEventListener("click", () => { explorerPrefix = explorerPrefix.slice(0, i + 1); renderExplorer(); });
+      crumbEl.appendChild(c);
+    });
+
+    const sideToMove = explorerPrefix.length % 2 === 0 ? "black" : "white";
+    document.getElementById("explorer-side-hint").textContent =
+      `轮到${sideToMove === "black" ? "黑方" : "白方"}走 · 下面按出现次数从多到少排列`;
+
+    const nextCandidates = DATA.opening_tree[explorerPrefixKey()] || [];
+    const listEl = document.getElementById("explorer-movelist");
+    listEl.innerHTML = "";
+    if (nextCandidates.length === 0) {
+      listEl.innerHTML = '<div class="empty-msg">这个分支下没有更多数据了（自对弈还没走到过这里，或者已经到深度上限）。</div>';
+      return;
+    }
+    nextCandidates.forEach((c) => {
+      const total = c.games;
+      const pctBlack = (c.black_wins / total) * 100;
+      const pctDraw = (c.draws / total) * 100;
+      const pctWhite = (c.white_wins / total) * 100;
+      const row = document.createElement("div");
+      row.className = "move-stat-row";
+      row.innerHTML = `
+        <div class="move-stat-top"><span class="notation">${c.notation}</span><span class="games-count">${c.games} 局</span></div>
+        <div class="bar">
+          <div class="seg-black" style="width:${pctBlack}%"></div>
+          <div class="seg-draw" style="width:${pctDraw}%"></div>
+          <div class="seg-white" style="width:${pctWhite}%"></div>
+        </div>
+        <div class="stat-legend">黑胜 ${c.black_wins}（${pctBlack.toFixed(0)}%） · 和 ${c.draws} · 白胜 ${c.white_wins}（${pctWhite.toFixed(0)}%）</div>
+      `;
+      row.addEventListener("click", () => { explorerPrefix = [...explorerPrefix, c.move]; renderExplorer(); });
+      listEl.appendChild(row);
+    });
+  }
+})();
+</script>
+</body>
+</html>

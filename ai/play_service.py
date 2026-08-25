@@ -26,7 +26,10 @@ Play against AI 的后端服务层——api.py 只需要认识这一个文件里
 
 from __future__ import annotations
 
+import random
+
 import engine_bridge as eb
+import opening_book
 from search import SearchResult, find_best_move
 
 # 难度 -> 搜索深度。深度2目前稳定在1秒以内，深度3中局约7秒（开局最慢约
@@ -92,7 +95,24 @@ def choose_ai_move(board, side_to_move, difficulty: str = DEFAULT_DIFFICULTY) ->
     depth = DIFFICULTY_DEPTH.get(difficulty, DIFFICULTY_DEPTH[DEFAULT_DIFFICULTY])
     pos = authoritative_board_to_position(board, side_to_move)
     side = _side_to_bridge(side_to_move)
+
+    # 第一步棋直接查开局库，不搜索——开局阶段搜索最贵（113种合法走法，
+    # 深度3要几十秒）收益却最低，而且引擎在子力全在家的开局局面里
+    # 静态评估给不出什么有效信号，经常选出不合棋理的招。
+    # 查表是0秒，而且必然是人类验证过的好棋；按权重随机挑还能保证
+    # 每盘棋开局都不一样，不会像以前那样永远只走雁门关。
+    if _is_initial_position(pos):
+        move, name, notation = opening_book.pick_opening_move(side)
+        return SearchResult(move, 0.0, 1, 0.0)
+
     return find_best_move(pos, side, depth)
+
+
+def _is_initial_position(pos: eb.Position) -> bool:
+    """是不是一步没走的开局局面（用来决定要不要查开局库）。
+    直接跟标准初始摆位逐格比对，比数步数可靠——不依赖调用方传步数进来。"""
+    initial = eb.Position.initial()
+    return pos.types == initial.types and pos.sides == initial.sides
 
 
 if __name__ == "__main__":
