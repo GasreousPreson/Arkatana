@@ -35,6 +35,7 @@ api.py  (第6版：接入时间控制 + 评分系统)
 """
 
 from __future__ import annotations
+import asyncio
 import uuid
 import secrets
 import random
@@ -80,9 +81,34 @@ if _AI_DIR is None:
 if _AI_DIR not in sys.path:
     sys.path.insert(0, _AI_DIR)
 import play_service
+import bot_controller
+from personas import PERSONAS
+
+# 人格账号的用户名直接用 display_name（比如"Kanderson"）——这样大厅/对局
+# 历史里显示的名字就是人格名，不需要专门再做一次"内部key -> 展示名"的转换
+# 给前端看。PERSONA_USERNAME_TO_KEY 反过来查："这个用户名是哪个人格"，
+# 调度器和出招触发逻辑都靠它判断"轮到走棋的这一方是不是 bot"。
+PERSONA_USERNAME_TO_KEY: dict[str, str] = {p.display_name: key for key, p in PERSONAS.items()}
+BOT_ORDER: list[str] = list(PERSONAS.keys())  # 轮转顺序——就用 personas.py 里定义的顺序
+
+BOT_SCHEDULER_STATE = bot_controller.SchedulerState()
 
 
 app = FastAPI(title="Arkatana API", version="0.7.0")
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    """服务启动时跑一次：
+        1. 确保9个 AI 人格账号都存在于数据库（幂等，重复部署/重启不会出问题）。
+        2. 启动 AI 自主建房的后台循环。
+    seed_bot_accounts 本身是同步的数据库操作，量很小（9条，且大多数时候
+    都是"已存在，直接跳过"），用 run_in_threadpool 意思一下、不占用事件循环
+    起步的这一小段时间就行，不需要更复杂的处理。
+    """
+    username_to_elo = {p.display_name: p.elo for p in PERSONAS.values()}
+    await run_in_threadpool(db.seed_bot_accounts, username_to_elo)
+    asyncio.create_task(_bot_scheduler_loop())
 
 # 注册一个具名的安全方案，Swagger 页面右上角会出现一个"Authorize"锁头按钮，
 # 登录后把 token 粘贴进去点一次，之后所有接口请求会自动带上，不用每个接口都手填。
@@ -290,10 +316,16 @@ def game_state(game_id: str, game: Game) -> dict:
         "white_player": players["white"],
         "rated": GAME_RATED.get(game_id, False),
         "ai_side": ai_info["side"] if ai_info else None,       # "black"/"white"/None——
-        "ai_difficulty": ai_info["difficulty"] if ai_info else None,  # 前端用这个判断对手
-                                                                        # 是不是AI，不要去猜
-                                                                        # black_player/white_player
-                                                                        # 里的字符串格式
+        "ai_difficulty": ai_info["difficulty"] if ai_info else None,  # 这两个字段只覆盖
+                                                                        # Play against AI 那条
+                                                                        # 历史路径（GAME_AI
+                                                                        # 记录的难度选择）
+        # black_is_bot/white_is_bot 覆盖**所有**bot情形（vs_ai 难度选择 +
+        # AI 人格大厅自主对局），前端要判断"这一方是不是bot"（比如要不要
+        # 跳过评分查询）应该用这两个字段，不要只看 ai_side——那个字段
+        # 检测不到人格账号在大厅正常配对到的对局。
+        "black_is_bot": players["black"] in PERSONA_USERNAME_TO_KEY or ai_info and ai_info["side"] == "black",
+        "white_is_bot": players["white"] in PERSONA_USERNAME_TO_KEY or ai_info and ai_info["side"] == "white",
         "clock_started": game.clock.active_side is not None,
         "in_check": is_in_check(game.board, game.current_side) if game.result.value == "ongoing" else False,
         "pending_offer": GAME_OFFERS.get(game_id),
@@ -392,51 +424,86 @@ def maybe_finalize_rating(game_id: str, game: Game) -> None:
     }
 
 
-async def trigger_ai_move(game_id: str) -> None:
-    """
-    后台任务：轮到 AI 走棋时调用（AI 执黑先手的开局第一步、或者人类走完之后
-    如果该 AI 应招了）。这个函数是在触发它的那次 HTTP 请求已经返回**之后**
-    才跑的（走 BackgroundTasks），AI 算出来的招法通过 WebSocket 推送给前端，
-    不会让人类那次请求被 AI 的思考时间（最长可能到30秒左右，见
-    ai/README.md 的性能记录）拖住。
-
-    play_service.choose_ai_move() 是纯 CPU 密集型同步函数，必须用
-    run_in_threadpool() 丢进线程池——直接调用会卡住事件循环，这段时间
-    服务器处理不了任何别的请求（包括别的对局的心跳/走棋）。
+async def _apply_bot_move_and_broadcast(game_id: str, game: Game, move) -> bool:
+    """落子前再确认一次状态没变（AI 思考的这几秒里，人类可能已经认输/悔棋，
+    或者对局被取消了），然后落子、存档、广播。返回是否真的走成了这一步——
+    调用方（下面的循环）靠这个判断"要不要继续检查下一步是不是还是 bot"。
     """
     game = GAMES.get(game_id)
     if game is None or game.result.value != "ongoing":
-        return
-    ai_info = GAME_AI.get(game_id)
-    if ai_info is None or game.current_side.value != ai_info["side"]:
-        return  # 不是轮到这个 AI（比如同一时间收到了多次触发），安全起见直接放弃
-
+        return False
     try:
-        result = await run_in_threadpool(
-            play_service.choose_ai_move, game.board, game.current_side, ai_info["difficulty"]
-        )
-    except Exception:
-        return  # AI 想不出棋不该发生在正常合法对局里；真出现异常也不应该让后台任务崩溃影响别的请求
-
-    if result.best_move is None:
-        return  # 理论上不会发生：轮到 AI 时游戏还是 ongoing，就必然有合法走法
-
-    # 落子前再确认一次状态没变——AI 思考的这几秒里，人类可能已经认输/悔棋，
-    # 或者对局被取消了。
-    game = GAMES.get(game_id)
-    if game is None or game.result.value != "ongoing" or game.current_side.value != ai_info["side"]:
-        return
-
-    try:
-        record = game.make_move(result.best_move.from_sq, result.best_move.to_sq)
+        record = game.make_move(move.from_sq, move.to_sq)
     except (IllegalMoveError, GameOverError):
-        return  # 防御性兜底：AI 只会选自己搜索器认证过的合法招法，正常不该走到这里
+        return False  # 防御性兜底：正常不该走到这里（bot 只会选自己认证过的合法招法）
 
     response = game_state(game_id, game)
     response["last_move"] = move_notation(record)
     await persist(game_id, game)
-    maybe_finalize_rating(game_id, game)  # AI 对局创建时已经强制 rated=False，这里调用只是保持跟人类走棋路径一致，内部会正确地什么都不做
+    maybe_finalize_rating(game_id, game)
     await manager.broadcast(game_id, response)
+
+    if game.result.value != "ongoing":
+        bot_controller.mark_game_ended(BOT_SCHEDULER_STATE, game_id)
+    return True
+
+
+async def trigger_ai_move(game_id: str) -> None:
+    """
+    后台任务：轮到 bot 走棋时调用——覆盖两条完全不同的来源：
+        1. Play against AI（GAME_AI 记录的难度选择，不是人格）：AI 执黑
+           先手的开局第一步、或者人类走完之后如果该 AI 应招了。
+        2. AI 人格自主对局（GAME_PLAYERS 里某一方的用户名本身就是一个
+           personas.py 里的人格账号）：不管对面是真人还是另一个 bot 人格
+           都适用——如果对面也是 bot，这个函数会自己循环着一直走下去，
+           直到轮到真人或者对局结束为止（bot vs bot 表演赛就是这么跑起来的，
+           不需要外部一步一步地重复触发）。
+
+    这个函数是在触发它的那次 HTTP 请求已经返回**之后**才跑的（走
+    BackgroundTasks 或者调度器的后台循环），bot 算出来的招法通过 WebSocket
+    推送给前端，不会让触发它的那次请求被 bot 的思考时间（最长可能到
+    深度3的几十秒，见 ai/README.md 的性能记录）拖住。
+
+    play_service.choose_ai_move()/choose_persona_move() 都是纯 CPU 密集型
+    同步函数，必须用 run_in_threadpool() 丢进线程池——直接调用会卡住事件
+    循环，这段时间服务器处理不了任何别的请求（包括别的对局的心跳/走棋）。
+    """
+    while True:
+        game = GAMES.get(game_id)
+        if game is None or game.result.value != "ongoing":
+            return
+
+        ai_info = GAME_AI.get(game_id)
+        if ai_info is not None and game.current_side.value == ai_info["side"]:
+            try:
+                result = await run_in_threadpool(
+                    play_service.choose_ai_move, game.board, game.current_side, ai_info["difficulty"]
+                )
+            except Exception:
+                return
+            if result.best_move is None:
+                return
+            if not await _apply_bot_move_and_broadcast(game_id, game, result.best_move):
+                return
+            continue  # 万一双方都恰好是 bot（理论上 vs_ai 不会发生），继续检查下一步
+
+        players = GAME_PLAYERS.get(game_id, {})
+        mover_username = players.get(game.current_side.value)
+        persona_key = PERSONA_USERNAME_TO_KEY.get(mover_username) if mover_username else None
+        if persona_key is None:
+            return  # 轮到真人了，或者这一方还没人认领，到此为止
+
+        try:
+            result = await run_in_threadpool(
+                play_service.choose_persona_move, game.board, game.current_side, persona_key
+            )
+        except Exception:
+            return
+        if result.best_move is None:
+            return
+        if not await _apply_bot_move_and_broadcast(game_id, game, result.best_move):
+            return
+        # 循环继续：如果对面也是 bot（bot vs bot 表演赛），下一轮会自动检测到
 
 
 def start_game_if_needed(game: Game) -> bool:
@@ -809,7 +876,11 @@ async def create_game(
 
 
 @app.post("/games/{game_id}/join")
-async def join_game(game_id: str, x_auth_token: str = Security(auth_scheme)):
+async def join_game(
+    background_tasks: BackgroundTasks,
+    game_id: str,
+    x_auth_token: str = Security(auth_scheme),
+):
     """
     登录用户加入一局对局，认领还没人认领的那一方。
     如果两方都已经有人认领，返回错误；如果自己已经在这局里了，也会提示。
@@ -835,6 +906,20 @@ async def join_game(game_id: str, x_auth_token: str = Security(auth_scheme)):
     await persist(game_id, GAMES[game_id], black_player=players["black"], white_player=players["white"])
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
+
+    # 如果这局是某个 AI 人格自主建的房，真人（或者以后的另一个bot）刚把它
+    # 填满——通知调度器"这局已经进入正式对局阶段"（触发全暂停，其余 bot
+    # 停止建新房，直到这局结束），并且如果恰好轮到 bot 先走（bot 执黑），
+    # 立刻放进后台任务去想，不让这次 join 请求被 bot 的思考时间拖住。
+    if game_id in {r.game_id for r in BOT_SCHEDULER_STATE.pending_rooms}:
+        bot_controller.mark_room_joined(BOT_SCHEDULER_STATE, game_id)
+    is_bot_turn = (
+        game.result.value == "ongoing"
+        and players.get(game.current_side.value) in PERSONA_USERNAME_TO_KEY
+    )
+    if is_bot_turn:
+        background_tasks.add_task(trigger_ai_move, game_id)
+
     return {**state, "my_side": resolve_my_side(game_id, username, None)}
 
 
@@ -881,6 +966,98 @@ def _discard_game(game_id: str) -> None:
     GAME_AI.pop(game_id, None)
     EPHEMERAL_GAMES.discard(game_id)
     db.delete_game(game_id)
+
+
+# ---------------------------------------------------------------------------
+# AI 人格自主对局：建房 / 轮转 / 超时 / 全暂停
+# ---------------------------------------------------------------------------
+# 决策逻辑本身（"现在该建几个房、该关哪几个、轮到谁"）在 ai/bot_controller.py
+# 里，是不碰数据库/网络的纯函数，方便单独测试。这里只负责"按决策结果
+# 真正去执行"——创建/关闭对局这些有副作用的操作。
+
+async def _create_bot_room(persona_key: str) -> Optional[str]:
+    """内部专用：让一个 AI 人格账号在大厅建一个空房间等人加入，跟人类走
+    /games 那个接口效果一样（会出现在大厅列表里、rated、有正确的时间控制），
+    但绕开了 HTTP 认证那一层——这是服务器自己代表 bot 账号操作，不是一次
+    真的 HTTP 请求，没有 X-Auth-Token 可言。
+
+    始终随机先后手（reasons同真人 rated 对局：rated 本来就要求随机先后手，
+    不需要也不应该让 bot"选边"）。不立刻走第一步——即使随机到执黑，也要
+    等真人（或者以后的 bot 对战功能）加入之后才开始走，理由见
+    ai/bot_controller.py 模块说明：建房那一刻还没有对手，抢先走一步没有
+    意义，也会让大厅列表看起来"这局其实已经开始了"，容易让人误解。
+    """
+    persona = PERSONAS[persona_key]
+    username = persona.display_name
+
+    try:
+        time_control = TimeControl(persona.minutes_per_side, persona.increment_seconds)
+    except ValueError:
+        return None  # 人格配置的时间控制不合法——不该发生，防御性兜底
+
+    game_id = uuid.uuid4().hex[:8]
+    GAMES[game_id] = Game(time_control=time_control)
+
+    if random.choice([True, False]):
+        black_slot, white_slot = username, None
+    else:
+        black_slot, white_slot = None, username
+
+    GAME_PLAYERS[game_id] = {"black": black_slot, "white": white_slot}
+    GAME_RATED[game_id] = True
+
+    try:
+        await persist(
+            game_id, GAMES[game_id],
+            black_player=black_slot, white_player=white_slot, rated=True,
+            was_random_side=True,
+        )
+    except Exception:
+        _discard_game(game_id)
+        return None
+
+    return game_id
+
+
+async def _bot_scheduler_tick() -> None:
+    """调度器的"一次心跳"——算出这一轮该做的事，真正去执行，再把结果写回
+    BOT_SCHEDULER_STATE。异常不能让整个后台循环挂掉，所以外层循环会兜底
+    捕获，这个函数本身尽量让每一步操作互相独立（一个 bot 建房失败不影响
+    其他 bot 照常建房/关房）。
+    """
+    actions = bot_controller.decide_actions(
+        BOT_SCHEDULER_STATE, now=time.time(), bot_order=BOT_ORDER,
+    )
+
+    for game_id in actions.close_room_ids:
+        _discard_game(game_id)
+
+    created: dict[str, str] = {}
+    for persona_key in actions.create_bot_keys:
+        game_id = await _create_bot_room(persona_key)
+        if game_id is not None:
+            created[persona_key] = game_id
+
+    bot_controller.apply_actions(BOT_SCHEDULER_STATE, actions, created, now=time.time())
+
+
+async def _bot_scheduler_loop() -> None:
+    """服务启动时后台常驻跑的循环，每隔 BOT_SCHEDULER_INTERVAL_SECONDS 跑
+    一次心跳。单次心跳出的任何异常都吞掉、打日志继续，不能让这个循环
+    因为一次偶发错误就彻底停摆——不然网站会在悄无声息中失去所有 AI
+    自主建房能力，比直接报错更难发现。
+    """
+    while True:
+        try:
+            await _bot_scheduler_tick()
+        except Exception as e:
+            print(f"[bot_scheduler] 心跳出错，跳过这一轮: {e}")
+        await asyncio.sleep(BOT_SCHEDULER_INTERVAL_SECONDS)
+
+
+BOT_SCHEDULER_INTERVAL_SECONDS = 15  # 检查间隔——远小于5分钟超时，
+# 保证"5分钟"这个数字在实际体验上跟设定值差不了太多；太频繁没有意义
+# （反正超时是分钟级的），15秒是个折中
 
 
 @app.post("/games/{game_id}/cancel")
@@ -1008,10 +1185,22 @@ async def make_move(
     maybe_finalize_rating(game_id, game)
     await manager.broadcast(game_id, response)
 
+    if game.result.value != "ongoing":
+        bot_controller.mark_game_ended(BOT_SCHEDULER_STATE, game_id)
+
+    # 人类这一步刚好让局面轮到了 bot（不管是 Play against AI 的难度选择，
+    # 还是大厅里正常配对到的 AI 人格账号）——放进后台任务去想，不在这次
+    # 请求里等，免得人类提交这一步之后，页面要卡最长几十秒才收到响应。
     ai_info = GAME_AI.get(game_id)
-    if ai_info is not None and game.result.value == "ongoing" and game.current_side.value == ai_info["side"]:
-        # 人类这一步刚好让局面轮到了 AI——放进后台任务去想，不在这次请求里等，
-        # 免得人类提交这一步之后，页面要卡最长约30秒才收到响应。
+    next_mover = players.get(game.current_side.value) if (players := GAME_PLAYERS.get(game_id)) else None
+    is_bot_turn = (
+        game.result.value == "ongoing"
+        and (
+            (ai_info is not None and game.current_side.value == ai_info["side"])
+            or (next_mover in PERSONA_USERNAME_TO_KEY)
+        )
+    )
+    if is_bot_turn:
         background_tasks.add_task(trigger_ai_move, game_id)
 
     my_side = resolve_my_side(game_id, get_current_user(x_auth_token), x_guest_id)

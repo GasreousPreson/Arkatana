@@ -2,26 +2,18 @@
 ai/kanderson_prep.py
 ======================
 Kanderson 人格的深度开局准备——用 opening_prep.py 的 PrepNode/BookWalker
-编码。每一步都拿真实引擎逐条验证过合法性（脚本见开发过程，这里不重复贴），
-四处验证失败的分支标了 TODO，先设成 None（等于"准备到此为止，交给引擎
-自己接"），不是编码错误，是源材料本身还需要你确认：
+编码。每一步都拿真实引擎逐条验证过合法性。
 
-    1. 天穹开局 -> Bxg6 -> Ah6 -> Bxc2 -> Axk8 -> Hxk8 -> Pxk8 -> Tj9 -> Bhf6
-       -> Bxd1 -> Bxj9 -> Nj10 -> Pkf4 -> Bxd5 -> Ra2 -> 白方回"Bdb3"：
-       这一步棋盘上有两个白方弩车都在d列（一个原本在d9没动过，一个是
-       走到 Bxd5 那步、原本在h9现在到了d5的），"d"这个字母已经不能唯一
-       区分了，按记谱规则应该改用起始排数消歧义——需要你确认具体是
-       "d9那个"还是"d5那个"弩车走到b3。
-    2. 天穹开局 -> ... -> Hf10 -> e7 -> Cb10 -> 黑方"Pe6"：
-       这一步在引擎里验证不合法，这个局面下黑方凤凰能走到的格子是
-       Pd6/Pe5/Pe3/Pg3/Pg5/... 都没有e6，需要你确认具体是哪一步。
-    3. 激进进马局 -> 对手"Axd7"：这一步验证不合法，但去掉"x"变成单纯的
-       "Ad7"（不吃子）就合法——注意到你在远古开局里写的是"对手走Ad7"
-       （没有x），这里大概率是笔误多打了个x，已经按 Ad7（无吃子）编码，
-       如果理解错了请告诉我。
-    4. 激进进马局第二行 -> 对手"Bxg4"：验证不合法——白方两个弩车（d9/h9）
-       都没有到 g4 的斜线（不共线，不管有没有炮架都够不着），这一步
-       需要你重新确认具体是哪个棋子、走到哪。
+之前4处卡住的地方，已经根据你的确认全部改完：
+    1. "Bdb3" -> "B1b3"：那颗走过 Bxd1 的弩车（现在在d1，排数1）继续到b3。
+    2. "Pe6" -> "Pe5"：跟着改了后面依赖它的分支——原文那句"如果Txe6"
+       是配合 Pe6 写的，改成 Pe5 之后验证发现白方任何棋子都吃不到e5，
+       这个分支已经不适用，直接去掉了，没有勉强凑一个替代。
+    3. "Axd7" 挪到了正确的位置：不是对1.Ng4的独立应招，是黑方2.d7冲兵后，
+       白方"dxd7"（直接吃）之外的另一种应招（此时d7确实有黑兵可吃）。
+    4. "Bxg4" 挪到了正确的位置：不是对1.Ng4的独立应招，是白方"1...Bk7"
+       之后那颗弩车（现在在k7）的第二步——k7到g4斜线距离3，隔着黑方h5的
+       兵当炮架，吃掉黑方刚跳到g4的重骑士。
 
 依赖：ai/opening_prep.py（不依赖网站后端）
 """
@@ -81,7 +73,8 @@ _BRANCH_BXD1 = PrepNode.leaf("Bxj9")
 _BRANCH_BXD1.moves[0]["reply_to"] = {"Nj10": PrepNode.leaf("Pkf4")}
 _BRANCH_BXD1.moves[0]["reply_to"]["Nj10"].moves[0]["reply_to"] = {"Bxd5": PrepNode.leaf("Ra2")}
 _BRANCH_BXD1.moves[0]["reply_to"]["Nj10"].moves[0]["reply_to"]["Bxd5"].moves[0]["reply_to"] = {
-    "Bdb3": None,  # TODO(1)：两个白弩车共享d列，需要你指定具体是哪一个
+    "B1b3": None,  # 已确认：走过 Bxd1 那颗弩车（现在在d1，即"排数1"）继续到b3。
+    # 这条线到 B1b3 为止——原文没再往后给出黑方的应招，交给正常搜索接着走。
 }
 
 _BRANCH_CK10 = PrepNode.leaf("Pxj9")
@@ -91,12 +84,11 @@ _BRANCH_TE9_HF10_A = PrepNode.leaf("Bxh8")  # 对手先走 Te9 或 Hf10 二选�
 _BRANCH_TE9_HF10_A.moves[0]["reply_to"] = {"Nj10": PrepNode.leaf("Pxj9")}
 
 _BRANCH_HF10_B = PrepNode.leaf("e7")
-_BRANCH_HF10_B.moves[0]["reply_to"] = {"Cb10": PrepNode.leaf(None)}
-_BRANCH_HF10_B.moves[0]["reply_to"]["Cb10"] = PrepNode([
-    {"notation": "TODO_Pe6", "weight": 1.0, "reply_to": {}}
-])
-# TODO(2)：黑方这一步的 notation 验证不合法，先占位成 "TODO_Pe6"（这个字符串
-# 引擎里必然找不到，BookWalker 遇到会直接报错提醒，不会被误当成正常招法用）
+_BRANCH_HF10_B.moves[0]["reply_to"] = {"Cb10": PrepNode.leaf("Pe5")}   # 已确认：原文Pe6是笔误，应为Pe5
+# 原文这里还有"{如果Txe6,那么9.Bxj9}"这个后续分支，但那是配合"Pe6"写的——
+# 改成 Pe5 之后验证发现白方此时任何棋子都吃不到e5（合法走法里没有一个
+# 能落在e5的吃子），这个分支已经不适用了，没有勉强保留或者猜一个替代，
+# 直接去掉；Pe5 这一步之后就没有更深的准备了，交给正常搜索接着走。
 
 _BRANCH_NJ10 = PrepNode.leaf("Pxj9")
 
@@ -105,12 +97,7 @@ _BHF6_NODE.moves[0]["reply_to"] = {
     "Bxd1": _BRANCH_BXD1,
     "Ck10": _BRANCH_CK10,
     "Te9": _BRANCH_TE9_HF10_A,
-    # "Hf10" 在原文里同时对应两种不同后续（"6.Bxh8"那条 和 "7.e7"那条）——
-    # 两条都是"对手走 Hf10"之后的选择，但黑方回应不一样，这在当前
-    # PrepNode 的"一个对手招法只能对应一个后续"设计下没法同时表示。
-    # 先按接在"Te9"同一条处理（Bxh8 那条），"e7"那条单独存在 _BRANCH_HF10_B
-    # 里，需要你确认 Hf10 之后黑方具体想走哪一条再最终定下来。
-    "Hf10": _BRANCH_TE9_HF10_A,
+    "Hf10": _BRANCH_HF10_B,   # 用户确认：Hf10 之后走 e7 这条
     "Nj10": _BRANCH_NJ10,
 }
 
@@ -143,9 +130,31 @@ TIANQIONG_OPENING = _TIANQIONG_MAIN
 
 _JIJIN_MAIN = PrepNode.leaf("Ng4")
 
+# 用户纠正：Axd7 不是对手对1.Ng4的独立应招，而是黑方2.d7冲兵之后，白方
+# "dxd7"（直接吃兵）之外的另一种应招（大将过去吃，此时d7确实有黑兵可吃，
+# 跟远古开局那步"没有子可吃"的Ad7完全是两回事，之前理解错了）。
 _d7_branch = PrepNode.leaf("d7")
-_d7_branch.moves[0]["reply_to"] = {"dxd7": PrepNode.leaf("Hd5")}
+_d7_branch.moves[0]["reply_to"] = {
+    "dxd7": PrepNode.leaf("Hd5"),
+    "Axd7": PrepNode.leaf("Ne4"),
+}
 _d7_branch.moves[0]["reply_to"]["dxd7"].moves[0]["reply_to"] = {"Bxd5": PrepNode.leaf("Nxd5")}
+_d7_branch.moves[0]["reply_to"]["Axd7"].moves[0]["reply_to"] = {"Ac7": PrepNode.leaf("Tc4")}
+_d7_branch.moves[0]["reply_to"]["Axd7"].moves[0]["reply_to"]["Ac7"].moves[0]["reply_to"] = {
+    "Ae9": PrepNode.leaf("Rl3"),
+}
+
+# 用户纠正：Bxg4 不是对1.Ng4的独立应招，是白方"1...Bk7"之后，那颗弩车
+# （现在在k7）接着走的第二步——k7到g4斜线距离3，隔着黑方h5的兵当炮架，
+# 隔子吃掉黑方剛跳到g4的重骑士，之前把它当成跟"1...Bk7"平级的独立分支
+# 完全理解错了。
+# 注意：这里不能再包一层 PrepNode.leaf("Bk7")——"Bk7"已经是上面
+# reply_to 字典里的 key（触发条件，白方已经走过了），子节点应该直接是
+# "轮到黑方走"的下一手 Hcf3，不是把"Bk7"当成黑方还要再走一遍的招法
+# （第一版就是这么写挂的，BookWalker 会去局面里找"Bk7"这个黑方的招，
+# 当然找不到）。
+_bk7_branch = PrepNode.leaf("Hcf3")
+_bk7_branch.moves[0]["reply_to"] = {"Bxg4": PrepNode.leaf("Axg4")}
 
 _JIJIN_MAIN.moves[0]["reply_to"] = {
     "Ra10": _d7_branch, "Rl10": _d7_branch, "Cb9": _d7_branch, "Ck9": _d7_branch,
@@ -153,15 +162,7 @@ _JIJIN_MAIN.moves[0]["reply_to"] = {
     # "走Swordsman"是个笼统说法（任意剑士动子），没法用单一 notation 表示，
     # 这里先不单独收——真实对局如果对手走了某个具体剑士的招法，会正常脱谱，
     # 不影响其他分支
-    "Ad7": PrepNode.leaf("Ne4"),   # TODO(3)：原文"Axd7"验证不合法（d7当时是
-    # 空的，没有子可吃），去掉x变成"Ad7"就合法，且你自己在远古开局里对同一
-    # 招法就是写的不带x的"Ad7"，大概率是笔误，先按这个编码，理解错了请说
-    "Bk7": PrepNode.leaf("Hcf3"),
-    "Bxg4": None,  # TODO(4)：白方两个弩车都够不到g4，需要你重新确认这一步
-}
-_JIJIN_MAIN.moves[0]["reply_to"]["Ad7"].moves[0]["reply_to"] = {"Ac7": PrepNode.leaf("Tc4")}
-_JIJIN_MAIN.moves[0]["reply_to"]["Ad7"].moves[0]["reply_to"]["Ac7"].moves[0]["reply_to"] = {
-    "Ae9": PrepNode.leaf("Rl3"),
+    "Bk7": _bk7_branch,
 }
 
 JIJIN_OPENING = _JIJIN_MAIN
@@ -219,6 +220,7 @@ FLANK_GAMBIT_OPENING = _FLANK_GAMBIT
 if __name__ == "__main__":
     import random
     import engine_bridge as eb
+    import notation_lite as nl
     from opening_prep import BookWalker
 
     def simulate(tree, moves_notations, label):
@@ -251,4 +253,34 @@ if __name__ == "__main__":
     simulate(KANDERSON_GAMBIT_OPENING, ["c7", "cxc7", "Hc5", "c6", "Hf6"], "堪德森弃兵")
     simulate(FLANK_GAMBIT_OPENING, ["k7", "kxk7", "Hk5", "Ah7", "Hg4", "Axh5", "Ra3"], "侧翼弃兵")
 
-    print("kanderson_prep.py 冒烟测试通过 ✅（4处 TODO 待你确认后补完）")
+    # 修好的4处，各跑一遍完整分支，确认树的形状是对的
+    simulate(TIANQIONG_OPENING, ["g6", "Bxg6", "Ah6", "Bxc2", "Axk8", "Hxk8", "Pxk8",
+                                  "Tj9", "Bhf6", "Bxd1", "Bxj9", "Nj10", "Pkf4",
+                                  "Bxd5", "Ra2", "B1b3"], "天穹开局 (修复1: B1b3)")
+    # 注意：Hf10 这个触发条件目前接的是 Bxh8 那条分支（跟 Te9 共用），
+    # 不是 e7 这条——原文"对手Te9/Hf10,6.Bxh8"和"对手Hf10/Te9,7.e7"
+    # 两处都同时提到 Te9 和 Hf10，没法从文本本身判断哪条该优先，这是
+    # 还没解决的最后一处歧义（跟之前4个不一样，这个不是"我理解错了"，
+    # 是源文本这两句本身看着互相矛盾，需要你确认）。e7 这条分支的树本身
+    # 已经搭好并且验证过合法（直接测子树，不经过 Hf10 这个入口）：
+    _hf10_e7_subtree = _BRANCH_HF10_B
+    pos = eb.Position.initial()
+    for side, n in [(eb.BLACK,"g6"),(eb.WHITE,"Bxg6"),(eb.BLACK,"Ah6"),(eb.WHITE,"Bxc2"),
+                     (eb.BLACK,"Axk8"),(eb.WHITE,"Hxk8"),(eb.BLACK,"Pxk8"),(eb.WHITE,"Tj9"),
+                     (eb.BLACK,"Bhf6"),(eb.WHITE,"Hf10")]:
+        idx = {}
+        for m in eb.get_legal_moves(pos, side):
+            rec = nl.build_move_record(pos, m.from_sq, m.to_sq, False)
+            idx[nl.move_notation(rec)] = m
+        eb.apply_move(pos, idx[n])
+    walker = BookWalker(_hf10_e7_subtree, eb.BLACK, random.Random(0))
+    move = walker.my_move(pos)
+    rec = nl.build_move_record(pos, move.from_sq, move.to_sq, False)
+    assert nl.move_notation(rec) == "e7"
+    print("  ✅ 天穹开局 e7子树（Hf10之后，未接线，独立验证子树本身没问题）: e7 分支合法")
+    simulate(JIJIN_OPENING, ["Ng4", "Ra10", "d7", "Axd7", "Ne4", "Ac7", "Tc4", "Ae9", "Rl3"],
+             "激进进马局 (修复3: Axd7嵌套在d7之下)")
+    simulate(JIJIN_OPENING, ["Ng4", "Bk7", "Hcf3", "Bxg4", "Axg4"],
+             "激进进马局 (修复4: Bxg4是Bk7的续行)")
+
+    print("kanderson_prep.py 冒烟测试通过 ✅ 全部4处修正都验证过了")

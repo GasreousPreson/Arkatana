@@ -183,6 +183,11 @@ class User(Base):
     rating = Column(Integer, default=rating_module.INITIAL_RATING, nullable=False)
     rated_games_played = Column(Integer, default=0, nullable=False)  # 纯统计展示用，不参与保护期判定
     provisional_progress = Column(Float, default=0.0, nullable=False)  # 保护期"已消耗的波动额度"
+    is_bot = Column(Boolean, default=False, nullable=False)  # AI 人格专用账号——不走密码登录，
+    # 由 ai/bot_controller.py 那套调度逻辑在服务端内部直接操作（建房/加入/走棋）。
+    # 除了这个标记之外，bot 账号在数据库里就是普通的 User 行——评分结算
+    # （apply_rated_game_result/finalize_rated_game）完全不知道也不需要知道
+    # 某个用户名是不是 bot，同一套逻辑对真人和 bot 都适用。
 
 
 class OAuthAccount(Base):
@@ -758,6 +763,66 @@ def get_user_by_username(username: str, session_factory=None) -> Optional[User]:
         return session.execute(
             select(User).where(User.username == username)
         ).scalar_one_or_none()
+
+
+def create_bot_user(username: str, initial_rating: Optional[int] = None, session_factory=None) -> User:
+    """
+    创建一个 AI 人格专用账号（is_bot=True）。密码是一次性随机生成、
+    永远不会被用到的哈希——bot 账号不走密码登录这条路，由
+    ai/bot_controller.py 那套调度逻辑在服务端内部直接操作，不需要真的
+    "登录"（也就没有密码泄露的顾虑）。
+
+    幂等：用户名已存在就直接返回那个已有账号，不会重复创建或报错——
+    这样服务每次启动时都可以无脑调用一遍，不用自己先查一遍"存不存在"。
+    如果那个用户名已经被一个**真人**账号占用，直接报错（防止不小心把
+    某个真实玩家的账号"升级"成 bot，这个后果不可逆，宁可炸出来手动处理）。
+    """
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        existing = session.execute(
+            select(User).where(User.username == username)
+        ).scalar_one_or_none()
+        if existing is not None:
+            if not existing.is_bot:
+                raise ValueError(
+                    f"用户名 {username!r} 已经被一个真人账号占用，不能用作 bot 账号"
+                )
+            return existing
+
+        user = User(
+            username=username,
+            password_hash=_hash_password(secrets.token_hex(32)),
+            is_bot=True,
+            rating=initial_rating if initial_rating is not None else rating_module.INITIAL_RATING,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
+
+def seed_bot_accounts(username_to_elo: dict[str, int], session_factory=None) -> None:
+    """
+    服务启动时调用一次：确保 personas.py 里定义的每一个 AI 人格都有
+    对应的账号。db.py 本身不认识 personas.py（不想让后端反过来依赖
+    ai/ 目录），调用方（api.py）负责把 {用户名: 初始ELO} 这张简单映射
+    传进来。
+    """
+    for username, elo in username_to_elo.items():
+        create_bot_user(username, initial_rating=elo, session_factory=session_factory)
+
+
+def is_bot_account(username: Optional[str], session_factory=None) -> bool:
+    """给调度器判断"这个用户名是不是 bot"用。username 为 None（匿名）
+    或者查无此人，都返回 False——不报错，方便调用方少写一层判断。"""
+    if username is None:
+        return False
+    factory = session_factory or SessionLocal
+    with factory() as session:
+        user = session.execute(
+            select(User).where(User.username == username)
+        ).scalar_one_or_none()
+        return bool(user and user.is_bot)
 
 
 # ---------------------------------------------------------------------------
