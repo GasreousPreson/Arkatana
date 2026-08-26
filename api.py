@@ -492,6 +492,13 @@ async def trigger_ai_move(game_id: str) -> None:
         persona_key = PERSONA_USERNAME_TO_KEY.get(mover_username) if mover_username else None
         if persona_key is None:
             return  # 轮到真人了，或者这一方还没人认领，到此为止
+        # PERSONA_USERNAME_TO_KEY 只是静态配置表（人格名→key），跟这个用户名
+        # 背后到底是不是真的 bot 账号无关。如果这个用户名当初 seed 的时候
+        # 因为被真人占用而被跳过（见 db.seed_bot_accounts），这里绝不能把
+        # 真人的回合当成 bot 回合自动接管替他走棋——所以落子前必须再核实
+        # 一遍数据库里这个账号确实是 is_bot=True。
+        if not await run_in_threadpool(db.is_bot_account, mover_username):
+            return
 
         try:
             result = await run_in_threadpool(
@@ -989,6 +996,14 @@ async def _create_bot_room(persona_key: str) -> Optional[str]:
     """
     persona = PERSONAS[persona_key]
     username = persona.display_name
+
+    # 防御性检查：这个用户名对应的账号必须真的是 bot 账号才能用来自主建房。
+    # 正常情况下 seed_bot_accounts 早就在启动时把它建好了；但如果这个
+    # 用户名被一个真人账号占用（seed 时会跳过、只打警告，不会让整个服务
+    # 起不来），这里就必须再拦一次——绝不能让调度器拿一个真人的账号去
+    # 自主建房/自动落子，那等于在真人不知情的情况下操纵他的账号和分数。
+    if not await run_in_threadpool(db.is_bot_account, username):
+        return None
 
     try:
         time_control = TimeControl(persona.minutes_per_side, persona.increment_seconds)

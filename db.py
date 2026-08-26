@@ -849,9 +849,21 @@ def seed_bot_accounts(username_to_elo: dict[str, int], session_factory=None) -> 
     对应的账号。db.py 本身不认识 personas.py（不想让后端反过来依赖
     ai/ 目录），调用方（api.py）负责把 {用户名: 初始ELO} 这张简单映射
     传进来。
+
+    单个人格的用户名冲突（被真人占用）不应该拖垮整个服务启动——9个
+    人格账号是互相独立的，一个冲突了不代表其他8个也创建不了。所以
+    这里对每个人格单独 try/except：冲突的就打印一条显眼的警告然后
+    跳过，其余人格照常创建；等服务先跑起来了，再回头手动处理那个
+    冲突的用户名（改人格名，或者联系那位真人玩家）。
     """
     for username, elo in username_to_elo.items():
-        create_bot_user(username, initial_rating=elo, session_factory=session_factory)
+        try:
+            create_bot_user(username, initial_rating=elo, session_factory=session_factory)
+        except ValueError as e:
+            print(
+                f"[db.py] ⚠️ 跳过 bot 账号 {username!r} 的创建/校验：{e}"
+                f"（其余人格账号不受影响，继续启动；这个用户名冲突需要手动处理）"
+            )
 
 
 def is_bot_account(username: Optional[str], session_factory=None) -> bool:

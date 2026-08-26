@@ -171,7 +171,7 @@ PERSONAS: dict[str, Persona] = {
     ),
 
     "maggeritta": Persona(
-        key="maggeritta", display_name="Maggeritta",
+        key="maggeritta", display_name="Maggerita",
         depth=3, precision=1.0, prefer_aggressive_ties=False,
         weights=DEFAULT_WEIGHTS,   # 原文明确说"可以设置成与当前hard-ai一样的模型"
         opening_only=None,

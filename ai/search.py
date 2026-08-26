@@ -384,7 +384,7 @@ def find_persona_move(pos: Position, side_to_move: int, depth: int,
     prefer_aggressive_ties 两个维度互相独立、可以同时生效：
 
         precision=1.0 且 prefer_aggressive_ties=False（Gasparret/Ananta/
-        Maggeritta 这类"无风格/纯计算"人格）
+        Maggerita 这类"无风格/纯计算"人格）
             -> 直接走 find_best_move 的快速路径，不额外付任何代价。
 
         其余所有组合，都先算出全部候选的真实分值（find_move_distribution，
