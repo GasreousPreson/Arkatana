@@ -41,7 +41,7 @@ import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Float, Boolean, UniqueConstraint, select, or_, and_, func
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Float, Boolean, UniqueConstraint, select, or_, and_, func, inspect, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from game import Game
@@ -251,8 +251,50 @@ class OpeningNode(Base):
 # ---------------------------------------------------------------------------
 
 def init_db(target_engine=None) -> None:
-    """建表（如果表已存在则不会重复创建）"""
-    Base.metadata.create_all(target_engine or engine)
+    """建表（如果表已存在则不会重复创建），然后跑一遍小型迁移（给已经存在的
+    表补上后来新增的列——见 _migrate_schema 的说明）。"""
+    engine_to_use = target_engine or engine
+    Base.metadata.create_all(engine_to_use)
+    _migrate_schema(engine_to_use)
+
+
+def _migrate_schema(target_engine) -> None:
+    """
+    小型迁移：Base.metadata.create_all() 只会建**全新**的表，不会给已经
+    存在的表补上后来在模型里新增的列——这是 SQLAlchemy 的天然限制，
+    不是遗漏。is_bot 这个字段就是在线上库已经建好 users 表**之后**才加进
+    User 模型的，实际部署直接报错：
+        column users.is_bot does not exist
+    因为 create_all() 看到 users 表已经存在，什么都没做。
+
+    用 inspect() 查这张表真实有哪些列（这个 API 在 Postgres/SQLite 上
+    行为一致，不需要为两种数据库分别写 SQL 方言判断），只在确实缺失时
+    才 ALTER TABLE 补上，多次重复调用（每次部署都会调用一次）是安全的。
+    只做"加列"这种不会丢数据的迁移，不做删除/改类型这些有破坏性的操作
+    ——用户明确要求过 ALTER TABLE 迁移、不要 DROP TABLE。
+
+    以后模型里再加新字段，照这个格式在这里补一行就行，不需要新建迁移文件
+    /引入 Alembic 这类更重的工具——这个项目目前的字段变动频率，手写这几行
+    比维护一整套迁移框架的开销小得多。
+    """
+    inspector = inspect(target_engine)
+    if "users" not in inspector.get_table_names():
+        return  # 表还不存在，上面 create_all() 已经建出了带 is_bot 的全新表，不需要迁移
+
+    existing_columns = {col["name"] for col in inspector.get_columns("users")}
+    if "is_bot" not in existing_columns:
+        try:
+            with target_engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE users ADD COLUMN is_bot BOOLEAN NOT NULL DEFAULT FALSE"
+                ))
+        except Exception as e:
+            # 极端情况下如果有多个进程/worker同时启动、都检测到列缺失、
+            # 都想执行这条 ALTER——第一个会成功，其余的会因为"列已经存在"
+            # 报错。这里兜底吞掉，不让启动失败；如果是别的原因导致的报错
+            # （比如权限不够），is_bot 列还是会缺失，后续查询该报的错还是
+            # 会报，不会被这里静默掩盖。
+            print(f"[db.py] is_bot 列迁移出错（如果是并发启动导致的重复执行，可以忽略）: {e}")
 
 
 # ---------------------------------------------------------------------------
