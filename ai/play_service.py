@@ -5,19 +5,22 @@ Play against AI 的后端服务层——api.py 只需要认识这一个文件里
 不需要直接接触 engine_bridge.py / search.py 里的任何类型。
 
 设计要点：
-    - AI 的搜索（find_best_move）是纯 CPU 密集型同步代码，没有任何 I/O。
-      在 FastAPI 的 async 事件循环里直接调用会把整个进程卡住那么久——
-      这段时间处理不了任何别的请求，包括别的对局的心跳、WebSocket 消息。
-      api.py 那边调用 choose_ai_move() 时必须用 run_in_threadpool()
-      （Starlette 自带，api.py 已经在用）包一层丢进线程池，不能直接 await
-      或者同步调用。
+    - AI 的搜索（find_best_move_timed / find_persona_move）是纯 CPU 密集型
+      同步代码，没有任何 I/O。在 FastAPI 的 async 事件循环里直接调用会把
+      整个进程卡住那么久——这段时间处理不了任何别的请求，包括别的对局的
+      心跳、WebSocket 消息。api.py 那边调用 choose_ai_move()/
+      choose_persona_move() 时必须用 run_in_threadpool()（Starlette 自带，
+      api.py 已经在用）包一层丢进线程池，不能直接 await 或者同步调用。
 
     - 已知限制：Python 有 GIL，线程池能避免"卡住事件循环"，但没法让多盘
-      AI 对局的搜索真正跑满多核——如果同时有好几盘棋都在用 hard 难度
-      思考，会互相抢 CPU 时间片，每一盘实际变慢。这一步先不解决
-      （解决办法是换成进程池 ProcessPoolExecutor，但那样每次搜索都要
-      重新序列化局面、启动成本更高，只有真遇到并发瓶颈了再切换，
-      现在切换是过度设计）。
+      AI 对局的搜索真正跑满多核——如果同时有好几盘棋都在思考，会互相抢
+      CPU 时间片，每一盘实际变慢。2026-08 接入的墙钟时间预算
+      （find_best_move_timed/find_persona_move）缓解的是"这一步会不会
+      无限期算下去"，不是这个 GIL 限制本身——时间预算是按墙钟算的，
+      CPU 被分走了，同样的搜索量自然要花更久才碰到 deadline，深度会
+      搜得更浅，但不会导致真正的死锁/无响应。这一步（换成进程池
+      ProcessPoolExecutor 让搜索真正并行）先不解决，同样是"真遇到并发
+      瓶颈了再切换，现在切换是过度设计"。
 
     - 输入输出都用网站后端"权威引擎"的类型（Board 对象、pieces.Side、
       (col,row) 坐标元组）——这一层内部转换成 engine_bridge.Position，
@@ -30,18 +33,38 @@ import random
 
 import engine_bridge as eb
 import opening_book
-from search import SearchResult, find_best_move, find_persona_move
+from search import SearchResult, find_best_move_timed, find_persona_move, DEFAULT_TIME_BUDGET_SECONDS
 
-# 难度 -> 搜索深度。深度2目前稳定在1秒以内，深度3中局约7秒（开局最慢约
-# 30秒）——具体数字见 ai/README.md 的性能记录。三档先按这个来，
-# 以后要加更强档位（比如超时预算+迭代加深）再扩展这张表，
-# 不需要改调用方的任何代码。
+# 难度 -> 搜索深度封顶。2026-08 性能改版之后，实际搜到几层不再是"深度3
+# 就一定要等几十秒"这种固定账——find_best_move_timed 会在下面对应的时间
+# 预算内做迭代加深，预算不够深就停在浅一点的深度，预算富余就搜到这个封顶
+# 为止，见 search.py 顶部关于这次改版的说明。三档先按这个来，以后要加
+# 更强档位，加一对 depth/time_budget 配置即可，不需要改调用方的任何代码。
 DIFFICULTY_DEPTH = {
     "easy": 1,
     "medium": 2,
     "hard": 3,
 }
+
+# 对应的单步思考时间预算（秒）——不是"平均要花这么久"，是"最多愿意等
+# 这么久，超过就用已经搜完的那一层"。数值挑得比较保守：这是人类在等的
+# 实时交互场景，"hard"给10秒是"宁可偶尔搜不到depth3也不要让人等太久"
+# 和"尽量让hard名副其实"之间的权衡，不是从性能基准精确反推出来的，
+# 后续如果实际体验偏慢/偏弱，直接改这几个数字就行，不涉及任何其他改动。
+DIFFICULTY_TIME_BUDGET_SECONDS = {
+    "easy": 2.0,
+    "medium": 5.0,
+    "hard": 10.0,
+}
 DEFAULT_DIFFICULTY = "medium"
+
+# AI 人格系统统一用这个时间预算——人格对局的时间控制都很宽裕（最短的
+# Sangomanti 也有30分钟基础时间+120秒加秒），不像 Play against AI 那样
+# 有真人在对面干等，稍微多给一点预算换更深的搜索、更强的棋力，划算。
+# 9个人格目前都是同一个预算，以后如果想让某个人格"想得更久/更快"
+# （比如 style_note 里提到的棋风差异延伸到用时习惯），personas.py 加一个
+# 字段、这里从 persona 上读就行，不需要改 choose_persona_move 的调用方。
+PERSONA_TIME_BUDGET_SECONDS = DEFAULT_TIME_BUDGET_SECONDS + 2.0  # 10秒
 
 DIFFICULTY_LABELS = {
     "easy": "简单",
@@ -91,21 +114,27 @@ def choose_ai_move(board, side_to_move, difficulty: str = DEFAULT_DIFFICULTY) ->
     这是纯 CPU 密集型同步函数。调用方（api.py）必须用 run_in_threadpool()
     包一层，绝对不能直接在 async 函数里同步调用或者 await 这个函数本身
     （run_in_threadpool 才是"扔进线程池"，直接调用还是会卡住事件循环）。
+
+    2026-08 改版：内部走的是 find_best_move_timed（迭代加深 + 墙钟时间
+    预算），不再是固定深度、想搜多久搜多久的 find_best_move——这是"AI
+    走棋速度接近0"问题的直接解法，保证这个函数无论局面多复杂都大约在
+    DIFFICULTY_TIME_BUDGET_SECONDS[difficulty] 秒内返回。
     """
     depth = DIFFICULTY_DEPTH.get(difficulty, DIFFICULTY_DEPTH[DEFAULT_DIFFICULTY])
+    time_budget = DIFFICULTY_TIME_BUDGET_SECONDS.get(difficulty, DEFAULT_TIME_BUDGET_SECONDS)
     pos = authoritative_board_to_position(board, side_to_move)
     side = _side_to_bridge(side_to_move)
 
-    # 第一步棋直接查开局库，不搜索——开局阶段搜索最贵（113种合法走法，
-    # 深度3要几十秒）收益却最低，而且引擎在子力全在家的开局局面里
-    # 静态评估给不出什么有效信号，经常选出不合棋理的招。
-    # 查表是0秒，而且必然是人类验证过的好棋；按权重随机挑还能保证
-    # 每盘棋开局都不一样，不会像以前那样永远只走雁门关。
+    # 第一步棋直接查开局库，不搜索——开局阶段搜索最贵（100+种合法走法）
+    # 收益却最低，而且引擎在子力全在家的开局局面里静态评估给不出什么
+    # 有效信号，经常选出不合棋理的招。查表是0秒，而且必然是人类验证过
+    # 的好棋；按权重随机挑还能保证每盘棋开局都不一样，不会像以前那样
+    # 永远只走雁门关。
     if _is_initial_position(pos):
         move, name, notation = opening_book.pick_opening_move(side)
         return SearchResult(move, 0.0, 1, 0.0)
 
-    return find_best_move(pos, side, depth)
+    return find_best_move_timed(pos, side, max_depth=depth, time_budget=time_budget)
 
 
 def _is_initial_position(pos: eb.Position) -> bool:
@@ -132,6 +161,11 @@ def choose_persona_move(board, side_to_move, persona_key: str,
     没有贸然编码）。等 DSL 重新录入、opening_prep.py 接上之后，这个函数
     需要跟着改成"先问 BookWalker 有没有准备，没有才退回搜索"，接口已经
     设计好了，到时候只改这一个函数内部，不影响调用方。
+
+    2026-08 改版：find_persona_move 内部现在走的是时间预算版的搜索
+    （find_best_move_timed / find_move_distribution_timed，见 search.py
+    顶部说明），用 PERSONA_TIME_BUDGET_SECONDS 统一控制"最多愿意为这一步
+    想多久"——这是"人格AI基本不走棋"问题的直接解法。
     """
     from personas import get_persona
 
@@ -148,7 +182,7 @@ def choose_persona_move(board, side_to_move, persona_key: str,
     return find_persona_move(
         pos, side, persona.depth, weights=persona.weights,
         precision=persona.precision, prefer_aggressive_ties=persona.prefer_aggressive_ties,
-        rng=rng,
+        rng=rng, time_budget=PERSONA_TIME_BUDGET_SECONDS,
     )
 
 

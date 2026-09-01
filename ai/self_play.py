@@ -7,12 +7,14 @@ ai/data/games/*.jsonl（本地专用，不进版本库，见 ai/.gitignore）。
 开局多样性怎么来的：前 --temperature-plies 步用"温度采样"——不是每次都
 死板地选分数最高的那步，而是把每个候选走法的分值转成概率分布，按概率抽样
 （温度越高越随机，温度趋近0就退化成"直接选最优"）。这一段用的是
-search.find_move_distribution()，能拿到每个候选走法各自的真实分值，
-但因为放弃了根节点剪枝，比平时下棋用的 find_best_move() 慢不少
+search.find_move_distribution()，能拿到每个候选走法各自的真实分值。
+2026-08 之前这条路径完全不做根节点剪枝，比 find_best_move() 慢好几倍
 （同一开局局面实测：深度3下 find_best_move ≈18~30秒，
-find_move_distribution ≈54秒）——这个代价只有温度采样阶段才付，
-过了 --temperature-plies 之后自动切回快速的 find_best_move()，
-不会让整盘棋都用慢的那条路径。
+find_move_distribution ≈54秒，复杂中局局面下差距还会更大）；
+2026-08 改成 PVS（Principal Variation Search）之后两者速度基本拉平，
+这里仍然保留"过了 --temperature-plies 之后切回 find_best_move()"的
+设计——分值不再需要额外为了采样去搜全部候选，find_best_move() 本来
+就更省事，但差距已经不是量级上的了，具体见 search.py 顶部改版说明。
 
 对局怎么算结束：
     - 杀城 / 将死 -> 分出胜负

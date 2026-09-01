@@ -358,6 +358,7 @@ def get_game_or_404(game_id: str) -> Game:
         if game_id not in EPHEMERAL_GAMES:
             db.save_game(game_id, game)
         maybe_finalize_rating(game_id, game)
+        bot_controller.mark_game_ended(BOT_SCHEDULER_STATE, game_id)
 
     return game
 
@@ -434,7 +435,22 @@ async def _apply_bot_move_and_broadcast(game_id: str, game: Game, move) -> bool:
         return False
     try:
         record = game.make_move(move.from_sq, move.to_sq)
-    except (IllegalMoveError, GameOverError):
+    except GameOverError:
+        # game.make_move() 内部走棋前会先做一次惰性超时检测——如果这一步
+        # 恰好因为"轮到的这一方棋钟已经耗尽"被拒绝，game.result 在异常
+        # 抛出之前就已经被 check_timeout() 改写成"超时判负"了。不能像
+        # 普通异常一样吞掉不管：必须照样走一遍"对局结束"的收尾（存档/
+        # 广播/评分结算/解除AI vs AI占用），否则这盘棋会在数据库和前端
+        # 眼里永远"卡在进行中"，active_ai_vs_ai_game_id 也会永远卡住，
+        # 后续再也撮合不出下一场表演赛（bot vs bot 没有真人会去主动点开
+        # 这局触发惰性检测，这条路径是唯一会发现"超时"的地方）。
+        if game.result.value != "ongoing":
+            await persist(game_id, game)
+            maybe_finalize_rating(game_id, game)
+            await manager.broadcast(game_id, game_state(game_id, game))
+            bot_controller.mark_game_ended(BOT_SCHEDULER_STATE, game_id)
+        return False
+    except IllegalMoveError:
         return False  # 防御性兜底：正常不该走到这里（bot 只会选自己认证过的合法招法）
 
     response = game_state(game_id, game)
@@ -914,10 +930,11 @@ async def join_game(
     state = game_state(game_id, GAMES[game_id])
     await manager.broadcast(game_id, state)
 
-    # 如果这局是某个 AI 人格自主建的房，真人（或者以后的另一个bot）刚把它
-    # 填满——通知调度器"这局已经进入正式对局阶段"（触发全暂停，其余 bot
-    # 停止建新房，直到这局结束），并且如果恰好轮到 bot 先走（bot 执黑），
-    # 立刻放进后台任务去想，不让这次 join 请求被 bot 的思考时间拖住。
+    # 如果这局是某个 AI 人格自主建的房，真人刚把它填满——通知调度器
+    # "这个空房间已经有人了"（只是记账，从待加入名单移除；不会像 v1 那样
+    # 触发全局暂停，其余 bot 的建房节奏完全不受影响），并且如果恰好轮到
+    # bot 先走（bot 执黑），立刻放进后台任务去想，不让这次 join 请求被
+    # bot 的思考时间拖住。
     if game_id in {r.game_id for r in BOT_SCHEDULER_STATE.pending_rooms}:
         bot_controller.mark_room_joined(BOT_SCHEDULER_STATE, game_id)
     is_bot_turn = (
@@ -976,11 +993,20 @@ def _discard_game(game_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AI 人格自主对局：建房 / 轮转 / 超时 / 全暂停
+# AI 人格自主对局：建房 / 轮转 / 超时 / AI 互相配对
 # ---------------------------------------------------------------------------
-# 决策逻辑本身（"现在该建几个房、该关哪几个、轮到谁"）在 ai/bot_controller.py
-# 里，是不碰数据库/网络的纯函数，方便单独测试。这里只负责"按决策结果
-# 真正去执行"——创建/关闭对局这些有副作用的操作。
+# 决策逻辑本身（"现在该建几个房、该关哪几个、要不要撮合一场AI vs AI"）在
+# ai/bot_controller.py 里，是不碰数据库/网络的纯函数，方便单独测试。这里
+# 只负责"按决策结果真正去执行"——创建/加入/关闭对局这些有副作用的操作。
+#
+# v2 改动（相较最初版本）：
+#   - 取消了"真人加入bot房间就全局暂停其余bot建房"的设计——真人的对局
+#     进行与否，跟 bot 建房/轮转节奏完全解耦，任何时候都正常运作。
+#   - 新增 AI 主动加入别的 AI 空房间，凑成一场 AI vs AI 表演赛给人观战；
+#     同一时刻整个网站最多一场这样的表演赛（ai/bot_controller.py 里的
+#     active_ai_vs_ai_game_id 负责这个"排队"），这场结束后才会撮合下一场。
+#     这个限制只约束"AI主动加入AI房间"这一个动作，不影响真人随时加入
+#     任何bot空房间，也不影响bot建房/关房的轮转。
 
 async def _create_bot_room(persona_key: str) -> Optional[str]:
     """内部专用：让一个 AI 人格账号在大厅建一个空房间等人加入，跟人类走
@@ -990,7 +1016,7 @@ async def _create_bot_room(persona_key: str) -> Optional[str]:
 
     始终随机先后手（reasons同真人 rated 对局：rated 本来就要求随机先后手，
     不需要也不应该让 bot"选边"）。不立刻走第一步——即使随机到执黑，也要
-    等真人（或者以后的 bot 对战功能）加入之后才开始走，理由见
+    等真人或者另一个 bot（见 _join_bot_room）加入之后才开始走，理由见
     ai/bot_controller.py 模块说明：建房那一刻还没有对手，抢先走一步没有
     意义，也会让大厅列表看起来"这局其实已经开始了"，容易让人误解。
     """
@@ -1034,14 +1060,93 @@ async def _create_bot_room(persona_key: str) -> Optional[str]:
     return game_id
 
 
+def _currently_busy_bot_keys() -> set[str]:
+    """当前正处于"双方都已确定、对局仍在进行"状态的对局里，涉及到的 bot
+    人格 key 集合——只在撮合"AI主动加入别的AI空房间"时用来排除候选人，
+    避免同一个人格账号被同时拉进两盘棋（一边在正常下棋，一边又被拉去
+    开一场新的表演赛）。不影响建房轮转：建房那一刻还没有对手，不构成
+    "正在下棋"，一个正忙的人格照样可以轮到自己去开下一个空房间。
+    """
+    busy: set[str] = set()
+    for game_id, players in GAME_PLAYERS.items():
+        black, white = players.get("black"), players.get("white")
+        if black is None or white is None:
+            continue  # 还没凑齐两人的空房间，不算"正在下棋"
+        game = GAMES.get(game_id)
+        if game is None or game.result.value != "ongoing":
+            continue
+        for username in (black, white):
+            key = PERSONA_USERNAME_TO_KEY.get(username)
+            if key is not None:
+                busy.add(key)
+    return busy
+
+
+async def _join_bot_room(game_id: str, joiner_key: str) -> Optional[str]:
+    """内部专用：让一个 AI 人格账号加入另一个 bot 建的空房间，凑成一场
+    AI vs AI 表演赛——效果跟人类走 /games/{id}/join 一样（认领剩下的
+    那个空位，凑齐两人就开始计时），但同样绕开 HTTP 认证层，服务器
+    直接代表 bot 账号操作。
+
+    可能因为竞态条件而"加入失败"（最典型的情况：调度器这一轮刚决定要
+    撮合这个房间，但同一时刻一个真人抢先 /join 了）——这种情况直接放弃，
+    返回 None，绝不覆盖已经存在的认领。调用方（_bot_scheduler_tick）会
+    把 None 原样传给 bot_controller.apply_actions，跟建房失败一样，
+    不会认为这场表演赛已经开始，下一轮调度会重新评估。
+    """
+    persona = PERSONAS[joiner_key]
+    username = persona.display_name
+
+    if not await run_in_threadpool(db.is_bot_account, username):
+        return None  # 防御性检查，理由同 _create_bot_room
+
+    game = GAMES.get(game_id)
+    players = GAME_PLAYERS.get(game_id)
+    if game is None or players is None or game.result.value != "ongoing":
+        return None  # 房间已经不在了（可能刚好超时被关掉）
+
+    if username in (players.get("black"), players.get("white")):
+        return None  # 不该发生：不会把bot撮合去加入自己创建的房间
+
+    if players.get("black") is None:
+        players["black"] = username
+    elif players.get("white") is None:
+        players["white"] = username
+    else:
+        return None  # 两个位置都已经有人了——大概率是真人抢先加入，放弃
+
+    start_game_if_needed(game)
+
+    try:
+        await persist(game_id, game, black_player=players["black"], white_player=players["white"])
+    except Exception:
+        return None
+
+    state = game_state(game_id, game)
+    await manager.broadcast(game_id, state)
+
+    # 两个位置现在都是 bot 账号了，不管随机到哪一方先走，都需要触发它去想。
+    # trigger_ai_move 内部本来就是个循环，一路自动接力到轮到真人或者对局
+    # 结束为止，这里只需要触发一次。这里不在 HTTP 请求里，没有 BackgroundTasks
+    # 可用，直接开一个后台任务，不 await 它（否则这次心跳会被 bot 的思考
+    # 时间拖住）。
+    asyncio.create_task(trigger_ai_move(game_id))
+
+    return game_id
+
+
 async def _bot_scheduler_tick() -> None:
     """调度器的"一次心跳"——算出这一轮该做的事，真正去执行，再把结果写回
     BOT_SCHEDULER_STATE。异常不能让整个后台循环挂掉，所以外层循环会兜底
     捕获，这个函数本身尽量让每一步操作互相独立（一个 bot 建房失败不影响
-    其他 bot 照常建房/关房）。
+    其他 bot 照常建房/关房/撮合）。
     """
+    busy_bots = _currently_busy_bot_keys()
+    join_eligible = [key for key in BOT_ORDER if key not in busy_bots]
+
     actions = bot_controller.decide_actions(
         BOT_SCHEDULER_STATE, now=time.time(), bot_order=BOT_ORDER,
+        join_eligible_bots=join_eligible,
     )
 
     for game_id in actions.close_room_ids:
@@ -1053,7 +1158,15 @@ async def _bot_scheduler_tick() -> None:
         if game_id is not None:
             created[persona_key] = game_id
 
-    bot_controller.apply_actions(BOT_SCHEDULER_STATE, actions, created, now=time.time())
+    joined_game_id: Optional[str] = None
+    if actions.join is not None:
+        room_game_id, joiner_key = actions.join
+        joined_game_id = await _join_bot_room(room_game_id, joiner_key)
+
+    bot_controller.apply_actions(
+        BOT_SCHEDULER_STATE, actions, created, now=time.time(),
+        joined_game_id=joined_game_id,
+    )
 
 
 async def _bot_scheduler_loop() -> None:
