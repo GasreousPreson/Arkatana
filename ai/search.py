@@ -67,9 +67,9 @@ import time
 from typing import Optional
 
 from engine_bridge import (
-    BLACK, EMPTY, Move, PROMOTED, Position, WHITE, apply_move, generate_side_moves,
-    get_legal_moves, has_only_throne, is_checkmate, is_in_check, other_side,
-    sq_index,
+    BLACK, EMPTY, MAX_ROW, MIN_ROW, Move, PROMOTED, Position, WHITE, apply_move,
+    generate_side_moves, get_legal_moves, has_only_throne, is_checkmate, is_in_check,
+    other_side, sq_index,
 )
 from evaluate import DEFAULT_WEIGHTS, Weights, evaluate, piece_value
 
@@ -390,10 +390,18 @@ _PVS_EPSILON = 1e-6
 
 def _root_search(pos: Position, side_to_move: int, depth: int, weights: Weights,
                   nodes: list[int], pv_move: Optional[Move] = None,
-                  deadline: Optional[float] = None) -> list[RootMoveScore]:
+                  deadline: Optional[float] = None,
+                  restrict_moves: Optional[list[Move]] = None) -> list[RootMoveScore]:
     """根节点搜索，find_best_move 和 find_move_distribution 共用——两边
     都需要"每个候选走法在这个深度下的分值"，区别只在于前者只要最优的
     那一个，后者要保留全部。
+
+    restrict_moves：只搜这些走法，不搜全部合法走法。给自对弈的"招法库
+    限定"用（见 ai/opening_repertoire.py）——把开局的变招范围收窄到
+    人类认为有意义的那些招法上，既提高训练数据质量，也顺带省掉大量
+    搜索开销。调用方必须保证传进来的都是当前局面下的合法走法（这里
+    不再重复验证，重复验证等于把省下来的开销又花回去）；传 None
+    就是搜全部合法走法，行为跟以前完全一样。
 
     用 PVS（Principal Variation Search）而不是老实对每一手都做全窗口
     [-inf, inf] 搜索：排序后的第一手（大概率是最好的那手——pv_move
@@ -413,7 +421,7 @@ def _root_search(pos: Position, side_to_move: int, depth: int, weights: Weights,
     "明显更差的招法分值不够精确"这点代价是可以接受的——这些招法本来
     就该在采样里占极小权重，精确到小数点后几位不影响实际选择。
     """
-    legal = get_legal_moves(pos, side_to_move)
+    legal = restrict_moves if restrict_moves is not None else get_legal_moves(pos, side_to_move)
     if not legal:
         return []
 
@@ -454,7 +462,8 @@ def _root_search(pos: Position, side_to_move: int, depth: int, weights: Weights,
 
 
 def find_move_distribution(pos: Position, side_to_move: int, depth: int, weights: Weights = DEFAULT_WEIGHTS,
-                            pv_move: Optional[Move] = None, deadline: Optional[float] = None):
+                            pv_move: Optional[Move] = None, deadline: Optional[float] = None,
+                            restrict_moves: Optional[list[Move]] = None):
     """根节点每一个合法走法各自的 minimax 分值——self_play.py 靠这个做
     "温度采样"：不是每次都死板地选分数最高的那步，而是按分值转成的概率
     分布抽样，让自对弈开局阶段能走出更多样的变着，不然每盘自对弈的开局都
@@ -474,6 +483,9 @@ def find_move_distribution(pos: Position, side_to_move: int, depth: int, weights
     捕获并回退到上一个完整跑完的深度；直接调用这个函数（不传 deadline，
     比如 self_play.py 现在的用法）不受影响，行为等同于没有时间限制。
 
+    restrict_moves：只在这些走法里做分布（自对弈的招法库限定用，
+    见 _root_search 的说明）。传 None 就是全部合法走法。
+
     返回 (candidates, elapsed)，candidates 是 list[RootMoveScore]；
     没有合法走法（终局）时返回 ([], elapsed)。
 
@@ -488,7 +500,8 @@ def find_move_distribution(pos: Position, side_to_move: int, depth: int, weights
     if done:
         return [], time.time() - t0
 
-    candidates = _root_search(pos, side_to_move, depth, weights, nodes, pv_move, deadline)
+    candidates = _root_search(pos, side_to_move, depth, weights, nodes, pv_move, deadline,
+                               restrict_moves=restrict_moves)
     return candidates, time.time() - t0
 
 
@@ -705,13 +718,64 @@ def _precision_to_temperature(precision: float) -> float:
 
 
 def _aggressiveness_key(pos: Position, candidate: RootMoveScore, side: int):
-    """"更冒险"的简化代理指标，用于 Kanderson 那种"最优解不唯一时偏爱冒险
-    招法"的人格特质——目前用"是不是吃子"和"扎进对方阵营多深"两个信号
-    近似，不是什么严谨的风险度量，就是个可解释、能跑起来的第一版，
-    以后想要更细致的判断（比如"是不是弃子换攻势"）可以在这里单独加。"""
+    """"更冒险"的代理指标，用于 Kanderson/Anaxagoras 那种"最优解不唯一时
+    偏爱冒险招法"的人格特质。
+
+    ⚠️ 2026-09 修正——第一版这里只看"是不是吃子"和"扎进对方阵营多深"，
+    实战暴露出严重问题：这两个信号恰好会精准挑中这个棋种里最典型的
+    陷阱招法。实测开局局面，静态评估排名第1的 a4→a8（炮塔隔山打牛吃掉
+    白方边兵、落点还正好触发升变）静态分高达 +1.376，但算清兑子链之后
+    真实价值是 -2.953——白送一个升变炮塔换一个兵。它既是吃子、又扎得极深
+    （直接落到对方第8排），在旧判据下是"最冒险"的招法，于是 Kanderson
+    每次都优先挑它。用户观察到的"所谓激进弃子攻杀本质上只是送子"，
+    机制就在这里：判据奖励的是"看起来凶"，而不是"真的凶"。
+
+    修正后的判据：**先看分值站不站得住，再谈冒险**。
+      - 候选是从根节点搜索结果里来的，score 已经是搜过 depth 层 + 静态
+        搜索（quiescence，会把反吃算清楚）之后的分值，不是静态评估——
+        也就是说 a4→a8 这种送子招法的 score 本来就已经很低了。
+      - 所以这里第一优先级直接用"这一手比当前最优差多少"分档：差得超过
+        max_sacrifice 的一律排到最后，无论它看起来多凶。这一条是硬门槛，
+        "偏爱冒险"永远不该翻越它去选一个明确送子的招法——真正的弃子
+        攻杀是"我算过了，弃掉的子能换回更多"，那种情况下搜索本来就会给
+        它一个不差的分值，根本不需要靠这个判据去救。
+      - 通过门槛之后，才在"分值都站得住"的招法里比谁更进攻性：吃子优先，
+        其次扎得深。
+
+    换句话说：冒险偏好只在**搜索认可的招法之间**做选择，不再有权力
+    去选搜索明确判为亏损的招法。这是"人格特质"和"基本棋力"之间该有的
+    分工——人格决定在几个都说得过去的选择里偏好哪种风格，不决定
+    要不要送子。
+    """
     m = candidate.move
-    depth_into_enemy = m.to_sq[1] if side == BLACK else (13 - m.to_sq[1])
+    depth_into_enemy = m.to_sq[1] if side == BLACK else (MAX_ROW + MIN_ROW - m.to_sq[1])
     return (1 if m.is_capture else 0, depth_into_enemy)
+
+
+# "偏爱冒险"最多允许比当前最优差多少分。0.6 分不到一个兵——够覆盖"这两手
+# 其实差不多，挑更凶的那个"，但拦得住任何真正意义上的弃子。这个数值是
+# 保守的初始值：宁可让 Kanderson 显得没那么"疯"，也不要让它继续送子；
+# 等以后有了自对弈数据能验证"弃子到底值不值"，再考虑放宽。
+MAX_AGGRESSIVE_SACRIFICE = 0.6
+
+
+def _pick_most_aggressive(pos: Position, candidates: list[RootMoveScore], side: int,
+                           best_score: float, maximizing: bool,
+                           max_sacrifice: float = MAX_AGGRESSIVE_SACRIFICE) -> RootMoveScore:
+    """在候选里挑"最冒险但分值仍然站得住"的那个。
+
+    先按 max_sacrifice 把明确亏损的招法整个筛掉（这是硬门槛，见
+    _aggressiveness_key 的说明），只在剩下的里面比进攻性。如果一条都
+    通不过门槛（说明除了最优解之外全是亏的），就老老实实返回最优解——
+    宁可这一步不体现人格特质，也不送子。
+    """
+    def loss(c: RootMoveScore) -> float:
+        return (best_score - c.score) if maximizing else (c.score - best_score)
+
+    affordable = [c for c in candidates if loss(c) <= max_sacrifice]
+    if not affordable:
+        return max(candidates, key=lambda c: c.score) if maximizing else min(candidates, key=lambda c: c.score)
+    return max(affordable, key=lambda c: _aggressiveness_key(pos, c, side))
 
 
 def find_persona_move(pos: Position, side_to_move: int, depth: int,
@@ -724,12 +788,15 @@ def find_persona_move(pos: Position, side_to_move: int, depth: int,
 
     第一版有个真实的设计漏洞，这里改掉了：之前只有 precision 恰好等于1.0
     的时候，prefer_aggressive_ties 才会生效——一旦 precision<1.0（比如
-    Kanderson 后来定成0.95），代码会直接走温度采样那条路，"偏爱冒险"这个
+    Anaxagoras 的0.85），代码会直接走温度采样那条路，"偏爱冒险"这个
     人格特质就完全不起作用了，等于白设。现在改成 precision 和
     prefer_aggressive_ties 两个维度互相独立、可以同时生效：
 
-        precision=1.0 且 prefer_aggressive_ties=False（Gasparret/Ananta/
-        Maggerita 这类"无风格/纯计算"人格）
+        precision=1.0 且 prefer_aggressive_ties=False——Gasparret/Ananta/
+        Maggerita 这类"无风格/纯计算"人格是这个组合原本的典型例子，
+        Kanderson 2026-09 之后也改成了这个组合（不代表它变"无风格"了，
+        它的风格完全靠 weights 体现，只是搜索阶段不再刻意偏离/凑冒险，
+        见 personas.py 里的说明）
             -> 直接走 find_best_move_timed 的快速路径，不额外付任何代价。
 
         其余所有组合，都先算出全部候选的真实分值（find_move_distribution_timed，
@@ -772,24 +839,20 @@ def find_persona_move(pos: Position, side_to_move: int, depth: int,
 
     if take_best:
         near_best = [c for c in ranked if abs(c.score - best_score) <= tie_epsilon]
-        chosen = _pick_most_aggressive(pos, near_best, side_to_move) if (
+        chosen = _pick_most_aggressive(pos, near_best, side_to_move, best_score, maximizing) if (
             prefer_aggressive_ties and len(near_best) > 1
         ) else near_best[0]
         return SearchResult(chosen.move, chosen.score, len(candidates), elapsed, depth_reached)
 
     if prefer_aggressive_ties:
         pool = ranked[:min(aggressive_pool_size, len(ranked))]
-        chosen = _pick_most_aggressive(pos, pool, side_to_move)
+        chosen = _pick_most_aggressive(pos, pool, side_to_move, best_score, maximizing)
         return SearchResult(chosen.move, chosen.score, len(candidates), elapsed, depth_reached)
 
     temperature = _precision_to_temperature(precision)
     chosen_move = softmax_sample(candidates, side_to_move, temperature, rng)
     chosen_score = next(c.score for c in candidates if c.move == chosen_move)
     return SearchResult(chosen_move, chosen_score, len(candidates), elapsed, depth_reached)
-
-
-def _pick_most_aggressive(pos: Position, candidates: list[RootMoveScore], side: int) -> RootMoveScore:
-    return max(candidates, key=lambda c: _aggressiveness_key(pos, c, side))
 
 
 # ---------------------------------------------------------------------------
@@ -917,5 +980,41 @@ if __name__ == "__main__":
     assert dcands, "应该有候选走法"
     assert ddepth >= 2, f"正常预算下至少应该搜到depth=2，实际={ddepth}"
     print(f"✅ find_move_distribution_timed：{delapsed:.2f}s 内返回，搜到 depth={ddepth}，候选数={len(dcands)}")
+
+    # ---- 回归测试：Kanderson 式"偏爱冒险"绝不能选明确送子的招法 ----
+    # 用开局那个最典型的陷阱招法做基准：a4→a8（炮塔隔山打牛吃边兵+升变），
+    # 静态评估 +1.376 看着很凶，算清反吃后真实价值 -2.953。旧版判据
+    # （只看"吃子+扎得深"）必选它，修正后必须拒绝它。
+    open_pos = Position.initial()
+    from engine_bridge import parse_coord as _pc
+    a4_a8 = [m for m in get_legal_moves(open_pos, BLACK)
+             if m.from_sq == _pc("a4") and m.to_sq == _pc("a8")]
+    assert a4_a8, "a4→a8 应该是合法走法（测试基准局面变了？）"
+    trap = RootMoveScore(a4_a8[0], -2.95)      # 搜索给出的真实分值（送子）
+    sane = RootMoveScore(
+        [m for m in get_legal_moves(open_pos, BLACK) if m.from_sq == _pc("f4")][0], 0.22
+    )                                            # 一手正常的、分值站得住的棋
+    picked = _pick_most_aggressive(open_pos, [sane, trap], BLACK,
+                                    best_score=0.22, maximizing=True)
+    assert picked is sane, (
+        f"偏爱冒险不该选明确送子的招法：选了 {picked.move.from_sq}->{picked.move.to_sq} "
+        f"(分值{picked.score:+.2f})"
+    )
+    print("✅ 修正后的'偏爱冒险'判据拒绝了送子招法 a4→a8（旧判据必选它）")
+
+    # 反向确认：分值都站得住的时候，确实还是会挑更激进的那个，
+    # 不能矫枉过正到"人格特质完全失效"
+    aggressive = RootMoveScore(a4_a8[0], 0.20)   # 同一手棋，但假设分值站得住
+    picked2 = _pick_most_aggressive(open_pos, [sane, aggressive], BLACK,
+                                     best_score=0.22, maximizing=True)
+    assert picked2 is aggressive, "分值站得住时，偏爱冒险应该仍然生效"
+    print("✅ 分值站得住时冒险偏好仍然生效（没有矫枉过正）")
+
+    # ---- restrict_moves：只搜指定的走法 ----
+    subset = get_legal_moves(open_pos, BLACK)[:5]
+    sub_cands, _ = find_move_distribution(open_pos, BLACK, depth=1, restrict_moves=subset)
+    assert len(sub_cands) == 5, f"restrict_moves 应该只搜这5手，实际搜了{len(sub_cands)}手"
+    assert {c.move for c in sub_cands} == set(subset)
+    print("✅ restrict_moves 正确限制了根节点候选范围（招法库限定用）")
 
     print("\nsearch.py 冒烟测试通过 ✅（完整对弈验证见 ai/cli_selfplay.py）")

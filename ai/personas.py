@@ -48,12 +48,17 @@ PERSONAS: dict[str, Persona] = {
 
     "kanderson": Persona(
         key="kanderson", display_name="Kanderson",
-        depth=3, precision=0.95, prefer_aggressive_ties=True,   # 用户确认：0.05的
-        # 不精准正是来自"愿意为了冒险招法牺牲一点精确度"——跟 prefer_aggressive_ties
-        # 配合，95%概率选真正最优解（并列时挑更冒险的），5%概率主动从
-        # 排名靠前的候选里挑一个更冒险的走法，即便它不是最优解（见
-        # search.py find_persona_move 的说明，这套组合逻辑是专门为这种
-        # 情况重新设计的）
+        # 2026-09 修改：precision 从0.95改成1.0、prefer_aggressive_ties从True
+        # 改成False——用户观察到这套"95%选真正最优解、5%主动挑更冒险的
+        # 候选、并列最优时也偏爱冒险"的组合，实战里表现出来根本不是
+        # "浪漫主义弃子攻杀"，就是单纯送子。现在改成precision Max的正常
+        # 模型，跟 Gasparret 一样是"永远算出来什么就走什么，不主动偏离/
+        # 不为了冒险扭曲选择"——Kanderson 的攻击性风格现在完全靠下面这组
+        # weights 本身来体现（王城安全看得更轻、更看重空间和节奏），
+        # 而不是靠搜索阶段刻意选一个非最优的"看起来更猛"的招法。
+        # 这样"敢送子"只会在 weights 真的算出"送子换来的空间/节奏值这个价"
+        # 的时候才发生，不会再无缘无故地送。
+        depth=3, precision=1.0, prefer_aggressive_ties=False,
         weights=Weights(
             material=1.0,
             king_safety=0.35,   # 默认0.55调低——"以弃子攻杀扬名""喜于激烈对攻"，
@@ -72,7 +77,7 @@ PERSONAS: dict[str, Persona] = {
         # 权重——这需要给 pick_opening_move 加一个"人格专属权重覆盖"的参数，
         # 是个小改动，等 Kanderson 深度开局树一起录入的时候顺便做。
         elo=1500, minutes_per_side=120, increment_seconds=90,
-        style_note="浪漫主义弃子攻杀，善控空间与开放线，深度开局准备待录入",
+        style_note="浪漫主义弃子攻杀，善控空间与开放线，精度Max的正常模型（风格完全靠weights体现），深度开局准备待录入",
     ),
 
     "anaxagoras": Persona(
@@ -125,7 +130,19 @@ PERSONAS: dict[str, Persona] = {
         weights=DEFAULT_WEIGHTS,   # "无风格棋手"——原文没有任何风格倾向，
         # 直接用未经人格化的默认权重最贴切
         opening_only=None,   # "只要不是违背棋理的开局，他都会下"=完整开局库
-        elo=1500, minutes_per_side=100, increment_seconds=80,
+        # 2026-09 修复：原来是 minutes_per_side=100, increment_seconds=80——
+        # 这两个数字都不在 clock.py 的 ALLOWED_MINUTES_PER_SIDE/
+        # ALLOWED_INCREMENT_SECONDS 白名单里（每方分钟数到90之后直接跳到105，
+        # 加秒到75之后直接跳到90，100和80都卡在两档中间）。TimeControl 的
+        # __post_init__ 发现不合法会直接抛 ValueError——这意味着
+        # _create_bot_room("gasparret") 每次都会撞进那个 ValueError 分支，
+        # 100%失败、连一次都不会成功，绝不是"轮到它的概率低"这种概率问题。
+        # 这正是"Gasparret 不会自动创建对局"的根因：它能加入别的bot建的房间，
+        # 是因为加入时用的是房间创建者早就建好、合法的 TimeControl，从来
+        # 没用过自己这组非法数值；只有轮到它自己建房时，才会摸到这个从没
+        # 校验过的非法配置。改成105+75——都是白名单里离原数值最近的合法档位，
+        # 两者之和还是180，尽量不改变原本"较长时间控制"这个设计意图。
+        elo=1500, minutes_per_side=105, increment_seconds=75,
         style_note="无风格，随对手应变",
     ),
 
@@ -214,13 +231,44 @@ def get_persona(key: str) -> Persona:
 
 
 if __name__ == "__main__":
+    import os
+    import sys
+
     import opening_book
+
+    # clock.py 是网站后端"权威引擎"那一层的模块，不在 ai/ 目录里——ai/
+    # 平时完全不依赖它，只有这里做"人格时间控制配置是否合法"这项跨层
+    # 校验时才需要临时借用，跟 ai/tests/test_engine_bridge.py 借用权威引擎
+    # 做交叉验证是同一个思路。只在 __main__ 里加这条 sys.path，不影响
+    # play_service.py/api.py 正常 import 这个模块时的行为。
+    _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
+    from clock import TimeControl
 
     for key, p in PERSONAS.items():
         print(f"{p.display_name:<12} depth={p.depth} precision={p.precision} "
               f"aggressive_ties={p.prefer_aggressive_ties} elo={p.elo} "
               f"time={p.minutes_per_side}+{p.increment_seconds}")
         print(f"   weights: {p.weights}")
+
+        # 校验人格自己的时间控制真的能建出一个合法的 TimeControl——
+        # 2026-09 之前 Gasparret 配的 100+80 两个数字都不在 clock.py 的
+        # 白名单档位里，TimeControl() 会直接抛 ValueError，但这个错误只会
+        # 在 api.py 的 _create_bot_room 里被悄悄 catch 掉、返回 None，
+        # 调度器每一轮都会失败、但不会有任何日志或报错——这正是"Gasparret
+        # 不会自动创建对局"这个bug能一直悄悄存在而没人发现的原因。
+        # 现在启动时就把这个校验做掉，配置写错了直接在这里炸，不会再
+        # 悄无声息地失败几十次调度循环才被人观察出来。
+        try:
+            TimeControl(p.minutes_per_side, p.increment_seconds)
+        except ValueError as e:
+            raise AssertionError(
+                f"{p.display_name} 的时间控制 {p.minutes_per_side}+{p.increment_seconds} "
+                f"不合法（{e}）——这会导致 api.py 的 _create_bot_room 每次都静默失败，"
+                f"这个人格永远建不了房，只能加入别人的房间"
+            ) from e
+
         if p.opening_only:
             # 校验人格限定的开局名字都能在 opening_book.py 里找到——
             # 名字打错字的话这里会直接报错，不用等到真的用起来才发现
@@ -232,4 +280,4 @@ if __name__ == "__main__":
             print("   开局: 完整开局库（不限定）")
         print()
 
-    print(f"personas.py 冒烟测试通过 ✅ 共 {len(PERSONAS)} 个人格")
+    print(f"personas.py 冒烟测试通过 ✅ 共 {len(PERSONAS)} 个人格（含时间控制合法性校验）")
