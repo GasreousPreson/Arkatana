@@ -1513,6 +1513,127 @@ def get_lobby(limit: int = 20):
     return {"rooms": db.list_open_rooms(limit=limit)}
 
 
+@app.get("/live")
+def get_live_games(limit: int = 6):
+    """
+    列出当前**正在进行中**的对局，供首页的观战区实时显示小棋盘。
+    公开接口，不需要登录——观战本来就是开放给所有人的。
+
+    跟 /lobby 的区别要分清楚：/lobby 是"还缺一个人、等着别人加入"的空房间，
+    /live 是"两边都到齐了、棋正在下"的对局。两者互不重叠。
+
+    数据源是内存里的 GAMES（进行中的对局本来就都在内存里），不查数据库——
+    这个接口会被首页每隔几秒轮询一次，绝不能每次都去敲一遍库。
+
+    返回的每一局都带完整棋盘，但**特意不带 legal_moves**——那张表
+    （当前行棋方每颗子能走到哪些格子）在对局页面里是为了点选棋子零延迟，
+    观战小棋盘根本用不到，而它恰恰是整个 game_state 里最大的一块。
+    去掉之后单局载荷小了一个数量级，轮询才不会变成带宽负担。
+    """
+    limit = max(1, min(limit, 24))
+    candidates = []
+
+    for game_id in list(GAMES.keys()):
+        # 单设备本机对战（Single game）不参与观战：它压根不落库、没有归属、
+        # 本质是一个人自己在同一个浏览器里摆棋，把它推到首页上给所有人看
+        # 既没意义也不合适。
+        if game_id in EPHEMERAL_GAMES:
+            continue
+
+        players = GAME_PLAYERS.get(game_id)
+        if not players or players.get("black") is None or players.get("white") is None:
+            continue  # 还没凑齐两个人——那是 /lobby 的范畴，不是"进行中"
+
+        try:
+            # 走 get_game_or_404 而不是直接取 GAMES[game_id]，是为了顺带享受它的
+            # 惰性超时检测：某一方棋钟早就耗尽、但因为没人再碰过这局所以还挂着
+            # "进行中"的对局，会在这里被正确结算掉（存档/评分/解除AI vs AI占用），
+            # 然后被下面的 ongoing 判断过滤掉，不会赖在观战列表里。
+            game = get_game_or_404(game_id)
+        except HTTPException:
+            continue
+
+        if game.result.value != "ongoing":
+            continue
+
+        candidates.append((game_id, game))
+
+    # 排序分两级：
+    #   第一级——AI vs AI 的对局排在最前面。观战区这个功能本来就主要是为了
+    #     看 AI 互搏，而 limit 只有几局，如果真人对局一多就会把表演赛挤出榜，
+    #     那这个功能最核心的用途反而没了。人机对局（Play against AI）和
+    #     真人对局照常显示，只是排在 AI 互搏后面。
+    #   第二级——最近刚走过棋的排前面。观战的人想看的是"正在动"的棋局，
+    #     不是某局开着但两边都在长考的。turn_started_at 就是"当前这一步是
+    #     什么时候开始计时的"，它越新代表这局刚刚发生过一步棋。
+    #     无时限对局没有这个时间戳（None），统一排到最后，再按步数多的优先。
+    def _sort_key(item):
+        game_id, g = item
+        players = GAME_PLAYERS[game_id]
+        ai_info = GAME_AI.get(game_id)
+        black_bot = bool(
+            players["black"] in PERSONA_USERNAME_TO_KEY
+            or (ai_info and ai_info["side"] == "black")
+        )
+        white_bot = bool(
+            players["white"] in PERSONA_USERNAME_TO_KEY
+            or (ai_info and ai_info["side"] == "white")
+        )
+        bot_vs_bot = 0 if (black_bot and white_bot) else 1
+
+        started = g.clock.turn_started_at
+        recency = (0, -started.timestamp()) if started else (1, -len(g.move_log))
+        return (bot_vs_bot,) + recency
+
+    candidates.sort(key=_sort_key)
+
+    games = []
+    for game_id, game in candidates[:limit]:
+        players = GAME_PLAYERS[game_id]
+        clock = game.clock
+        last = game.move_log[-1] if game.move_log else None
+
+        if clock.is_unlimited:
+            time_info = {"time_control": None, "black_time": None, "white_time": None}
+        else:
+            time_info = {
+                "time_control": {
+                    "minutes_per_side": clock.time_control.minutes_per_side,
+                    "increment_seconds": clock.time_control.increment_seconds,
+                },
+                "black_time": clock.time_left("black"),
+                "white_time": clock.time_left("white"),
+            }
+
+        # bot 判定跟 game_state() 用同一套规则：既要认出大厅里自主对局的
+        # AI 人格账号（PERSONA_USERNAME_TO_KEY），也要认出 Play against AI
+        # 那条历史路径记在 GAME_AI 里的难度型 AI，两者都算 bot。
+        ai_info = GAME_AI.get(game_id)
+        games.append({
+            "game_id": game_id,
+            "board": board_to_json(game.board),
+            "current_side": game.current_side.value,
+            "move_count": len(game.move_log),
+            "black_player": players["black"],
+            "white_player": players["white"],
+            "black_is_bot": bool(
+                players["black"] in PERSONA_USERNAME_TO_KEY
+                or (ai_info and ai_info["side"] == "black")
+            ),
+            "white_is_bot": bool(
+                players["white"] in PERSONA_USERNAME_TO_KEY
+                or (ai_info and ai_info["side"] == "white")
+            ),
+            "rated": GAME_RATED.get(game_id, False),
+            "in_check": is_in_check(game.board, game.current_side),
+            "last_move_from": coord_to_str(*last.from_sq) if last else None,
+            "last_move_to": coord_to_str(*last.to_sq) if last else None,
+            **time_info,
+        })
+
+    return {"games": games}
+
+
 @app.get("/database/search")
 def search_database(
     player: str | None = None,

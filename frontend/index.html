@@ -221,6 +221,82 @@
   .side-icon { vertical-align: -2px; margin-right: 6px; color: var(--parchment-light); }
   .empty-note { opacity: 0.6; font-size: 13px; padding: 8px 0; }
 
+  /* ---------------------------------------------------------------- */
+  /* 观战区（Live games）                                               */
+  /* ---------------------------------------------------------------- */
+
+  /* auto-fill + minmax：一行能塞几块小棋盘由容器宽度自己决定，
+     不写死列数——手机窄屏自动变成一列，宽屏自动铺满，不需要额外的
+     媒体查询去维护一堆断点。 */
+  .live-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 14px;
+  }
+  .live-card {
+    border: 1px solid rgba(184, 148, 75, 0.35);
+    border-radius: 3px;
+    background: rgba(184, 148, 75, 0.04);
+    padding: 8px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .live-card:hover {
+    border-color: var(--gold);
+    background: rgba(184, 148, 75, 0.12);
+  }
+  /* 小棋盘是 11×12，长宽比固定；容器按这个比例留位置，
+     图片/画布加载前后高度不跳动，列表不会抖。 */
+  .live-card canvas {
+    width: 100%;
+    aspect-ratio: 11 / 12;
+    display: block;
+    border-radius: 2px;
+  }
+  .live-player {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .live-player .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .live-player .clock {
+    font-family: Consolas, monospace;
+    opacity: 0.75;
+    flex-shrink: 0;
+  }
+  /* 轮到谁走，谁那一行加粗 + 前面点一个金点 */
+  .live-player.to-move { font-weight: 700; }
+  .live-player.to-move .name::before {
+    content: "●";
+    color: var(--gold);
+    margin-right: 4px;
+    font-size: 9px;
+    vertical-align: 1px;
+  }
+  .live-meta {
+    font-size: 10px;
+    opacity: 0.55;
+    text-align: center;
+    margin-top: 4px;
+    letter-spacing: 0.04em;
+  }
+  .live-bot-tag {
+    font-size: 9px;
+    border: 1px solid rgba(184, 148, 75, 0.5);
+    border-radius: 2px;
+    padding: 0 3px;
+    margin-left: 4px;
+    opacity: 0.8;
+    flex-shrink: 0;
+  }
+
   /* Game History */
   .history-entry {
     padding: 10px 0;
@@ -406,6 +482,10 @@
 </style>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="shared.js"></script>
+<!-- 观战小棋盘用：pieces.js 提供棋子素材，miniboard.js 是渲染器，
+     miniboard.js 依赖 ArkatanaPieces，必须排在 pieces.js 后面 -->
+<script src="pieces.js"></script>
+<script src="miniboard.js"></script>
 </head>
 <body>
 
@@ -456,17 +536,25 @@
           <span class="subtitle">improving your skills</span>
         </span>
       </div>
-      <div class="feature-card disabled" data-name="watch">
+      <a class="feature-card" data-name="watch" href="#live-panel" style="text-decoration:none; color:inherit;">
         <span class="icon">👁</span>
         <span>
           <span class="title">Watch</span><br>
           <span class="subtitle">learn from other players</span>
         </span>
-      </div>
+      </a>
     </section>
 
-    <!-- 中间列：Lobby + Game History -->
+    <!-- 中间列：观战 + Lobby + Game History -->
     <section class="center-column">
+      <!-- 观战区：正在进行中的对局，小棋盘实时跟着走棋更新，点进去即可观战 -->
+      <div class="panel" id="live-panel">
+        <h2>Live games <span class="more" id="btn-refresh-live">刷新 ⟳</span></h2>
+        <div class="live-grid" id="live-body">
+          <div class="empty-note" style="grid-column:1/-1;">加载中…</div>
+        </div>
+      </div>
+
       <div class="panel">
         <h2>Lobby <span class="more" id="btn-refresh-lobby">刷新 ⟳</span></h2>
         <table class="lobby-table">
@@ -884,6 +972,179 @@
   }
 
   document.getElementById("btn-refresh-lobby").addEventListener("click", refreshLobby);
+
+  // -------------------------------------------------------------------
+  // 观战区（Live games）
+  // -------------------------------------------------------------------
+  // 每隔 LIVE_POLL_MS 拉一次 /live，把进行中的对局画成小棋盘。
+  //
+  // 为什么用轮询而不是给每块小棋盘开一条 WebSocket：
+  //   现成的 /ws/games/{id} 推的是完整 game_state，里面最大的一块是
+  //   legal_moves（当前行棋方每颗子能走到哪些格子）——那是对局页为了
+  //   点选零延迟才需要的，观战小棋盘一个字节都用不到。首页同时显示 6 局
+  //   就要开 6 条连接、每步推 6 份大载荷，明显不划算。
+  //   /live 是一次请求拿回全部对局、且特意不含 legal_moves，轻得多。
+  //   代价是最长 LIVE_POLL_MS 的延迟——考虑到 bot 一步要想好几秒、
+  //   真人更慢，3 秒的粒度在观感上已经是"实时"了。
+  const LIVE_POLL_MS = 3000;
+  const liveBody = document.getElementById("live-body");
+  // { game_id: {card, canvas, mini, els} }——复用已有的卡片而不是每次
+  // 轮询都清空重建：重建会让画布闪一下、动画断掉，而且没必要。
+  const liveCards = new Map();
+  let livePollTimer = null;
+
+  function formatClock(seconds) {
+    if (seconds === null || seconds === undefined) return "∞";
+    const s = Math.max(0, Math.floor(seconds));
+    const m = Math.floor(s / 60);
+    return `${m}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  function buildLiveCard(game) {
+    const card = document.createElement("div");
+    card.className = "live-card";
+    card.title = "点击进入观战";
+
+    const canvas = document.createElement("canvas");
+    // 画布的内部分辨率固定，CSS 再把它缩放到栅格给的宽度——
+    // 用固定内部分辨率而不是跟着容器实时改 width/height，是因为改动
+    // canvas 的 width/height 属性会清空画布内容、打断正在播的动画。
+    canvas.width = 220;
+    canvas.height = 240;
+
+    const topRow = document.createElement("div");
+    topRow.className = "live-player";
+    const bottomRow = document.createElement("div");
+    bottomRow.className = "live-player";
+    const meta = document.createElement("div");
+    meta.className = "live-meta";
+
+    // 默认黑方视角（不翻转）：黑方在下、白方在上，跟对局页一致
+    card.appendChild(topRow);
+    card.appendChild(canvas);
+    card.appendChild(bottomRow);
+    card.appendChild(meta);
+
+    card.addEventListener("click", () => {
+      // spectate=1 让对局页知道这是来观战的，不要尝试认领座位
+      window.location.href = `game.html?id=${game.game_id}&spectate=1`;
+    });
+
+    const mini = window.ArkatanaMiniBoard.create(canvas, { flipped: false });
+    return { card, canvas, mini, topRow, bottomRow, meta };
+  }
+
+  function renderLiveCard(entry, game) {
+    const nameOf = (who, isBot) =>
+      `<span class="name">${who || "匿名"}</span>` +
+      (isBot ? `<span class="live-bot-tag">BOT</span>` : "");
+
+    // 上面是白方、下面是黑方（黑方视角），跟对局页默认朝向一致
+    entry.topRow.className = "live-player" + (game.current_side === "white" ? " to-move" : "");
+    entry.topRow.innerHTML =
+      nameOf(game.white_player, game.white_is_bot) +
+      `<span class="clock">${formatClock(game.white_time)}</span>`;
+
+    entry.bottomRow.className = "live-player" + (game.current_side === "black" ? " to-move" : "");
+    entry.bottomRow.innerHTML =
+      nameOf(game.black_player, game.black_is_bot) +
+      `<span class="clock">${formatClock(game.black_time)}</span>`;
+
+    const tc = game.time_control
+      ? `${game.time_control.minutes_per_side}+${game.time_control.increment_seconds}`
+      : "无限制";
+    entry.meta.textContent = `${game.move_count} 步 · ${tc} · ${game.rated ? "rated" : "casual"}`;
+
+    entry.mini.update(game);
+  }
+
+  async function refreshLive(showLoading) {
+    if (showLoading && liveCards.size === 0) {
+      liveBody.innerHTML = `<div class="empty-note" style="grid-column:1/-1;">加载中…</div>`;
+    }
+    let games;
+    try {
+      const data = await apiGet("/live?limit=6");
+      games = data.games || [];
+    } catch (err) {
+      // 轮询失败不清空已经画好的棋盘——网络抖一下就把整个观战区清掉
+      // 体验很差，保留上一次的画面、下一轮再试即可。只有一开始就没拿到
+      // 任何数据时才显示错误。
+      if (liveCards.size === 0) {
+        liveBody.innerHTML =
+          `<div class="empty-note" style="grid-column:1/-1;">观战列表加载失败：${err.message}</div>`;
+      }
+      return;
+    }
+
+    if (games.length === 0) {
+      liveCards.forEach((entry) => entry.mini.destroy());
+      liveCards.clear();
+      liveBody.innerHTML =
+        `<div class="empty-note" style="grid-column:1/-1;">现在没有正在进行的对局</div>`;
+      return;
+    }
+
+    // 已经结束/掉出榜单的对局：销毁它的动画循环再移除，
+    // 否则 requestAnimationFrame 会一直空转在一个已经不在页面上的画布上
+    const liveIds = new Set(games.map((g) => g.game_id));
+    for (const [gameId, entry] of Array.from(liveCards.entries())) {
+      if (!liveIds.has(gameId)) {
+        entry.mini.destroy();
+        entry.card.remove();
+        liveCards.delete(gameId);
+      }
+    }
+
+    // 第一次有数据时清掉"加载中"占位
+    const placeholder = liveBody.querySelector(".empty-note");
+    if (placeholder) placeholder.remove();
+
+    for (const game of games) {
+      let entry = liveCards.get(game.game_id);
+      if (!entry) {
+        entry = buildLiveCard(game);
+        liveCards.set(game.game_id, entry);
+      }
+      renderLiveCard(entry, game);
+      // appendChild 对已在文档里的节点等价于"移到末尾"，正好用来让卡片
+      // 顺序始终跟后端返回的顺序（最近走过棋的在前）一致
+      liveBody.appendChild(entry.card);
+    }
+  }
+
+  function startLivePolling() {
+    if (livePollTimer !== null) return;
+    livePollTimer = setInterval(() => refreshLive(false), LIVE_POLL_MS);
+  }
+  function stopLivePolling() {
+    if (livePollTimer === null) return;
+    clearInterval(livePollTimer);
+    livePollTimer = null;
+  }
+
+  // 标签页切到后台时停掉轮询——没人在看的时候没必要继续敲服务器，
+  // 切回来立刻补拉一次，不用等下一个周期。
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stopLivePolling();
+    } else {
+      refreshLive(false);
+      startLivePolling();
+    }
+  });
+
+  document.getElementById("btn-refresh-live").addEventListener("click", () => refreshLive(true));
+
+  // 棋子素材先预加载，加载完再重画一遍——素材没到位时小棋盘会用占位圆形
+  // 顶着，不至于空白，但拿到素材后要把它们换成真正的造型。
+  if (window.ArkatanaPieces) {
+    window.ArkatanaPieces.preloadAll().then(() => {
+      liveCards.forEach((entry) => entry.mini.redraw());
+    });
+  }
+
+  refreshLive(true).then(startLivePolling);
 
   // -------------------------------------------------------------------
   // Game History

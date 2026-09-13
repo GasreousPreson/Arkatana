@@ -872,6 +872,10 @@
   let viewIndex = null;
   let replayOnly = false;   // true = 纯复盘页面（没有实时对局），进来就是只读
   let singleMode = false;   // true = Single game（本机双人对战），界面精简、不认领任何一方
+  // true = 观战模式（首页观战区点进来的）。跟 replayOnly 的区别：这是一局
+  // **正在进行**的棋，WebSocket 照常连着、棋盘会跟着实时更新，只是不认领
+  // 座位、不能落子。replayOnly 看的是已经下完的棋谱，没有实时更新。
+  let spectateMode = false;
   let lastEndReason = null; // 这局是怎么结束的（resigned/checkmate/timedout/...）
 
   let authToken = localStorage.getItem("arkatana_token") || null;
@@ -1602,6 +1606,26 @@
     document.getElementById("btn-quit-single").style.display = "inline-block";
   }
 
+  function applySpectateModeLayout() {
+    // 悔棋/提和/认输都是"这局的玩家"才有的操作，观战者一个都用不到——
+    // 留在界面上只会让人点了才发现不行。整行藏掉，比逐个禁用干净。
+    const row = document.getElementById("action-row-normal");
+    if (row) row.style.display = "none";
+
+    // 在棋盘上方挂一个明确的"观战中"标识，让人一眼知道自己是什么身份，
+    // 不会把这里当成自己的对局
+    const badge = document.createElement("div");
+    badge.id = "spectate-badge";
+    badge.textContent = "👁 观战中 · 你不是这局的玩家";
+    badge.style.cssText =
+      "text-align:center; font-size:12px; letter-spacing:0.06em; " +
+      "padding:6px 10px; margin-bottom:8px; border-radius:3px; " +
+      "border:1px solid rgba(184,148,75,0.5); background:rgba(184,148,75,0.1); " +
+      "color:var(--gold, #b8944b);";
+    const boardArea = canvas.parentElement;
+    if (boardArea) boardArea.insertBefore(badge, canvas);
+  }
+
   document.getElementById("btn-single-undo").addEventListener("click", async () => {
     try {
       const state = await apiPost(`/games/${gameId}/undo`);
@@ -2050,12 +2074,20 @@
     setMessage(`已加载对局 ${id}`);
     connectSocket(gameId);
 
-    if (authToken) {
+    // 观战模式（从首页观战区点进来，网址带 spectate=1）绝对不能尝试认领座位。
+    // 实际上进行中的对局两个位置都满了，/join 会返回 409、被下面的 catch 吞掉，
+    // 所以就算不加这个判断也不会真的把观战者塞进对局里——但那是在"靠一个
+    // 错误路径来保证正确性"，太脆弱：只要哪天出现一局单方掉线留出空位的
+    // 对局，观战者一点进去就会莫名其妙变成选手。这里显式跳过，不依赖那个巧合。
+    if (authToken && !spectateMode) {
       try {
         const joined = await apiPost(`/games/${id}/join`);
         applyState(joined);
         setMessage(`已加入对局 ${id}`);
       } catch (e) { /* 忽略：可能已经是玩家，或对局已满员 */ }
+    }
+    if (spectateMode) {
+      setMessage(`观战中：对局 ${id}`);
     }
   }
 
@@ -2159,6 +2191,13 @@
 
   canvas.addEventListener("click", (evt) => {
     if (replayOnly || gameResult !== "ongoing" || !gameId) return;
+    if (spectateMode) {
+      // 观战者点棋盘不该有任何反应。真要点了也不会出事（服务器那边会因为
+      // 他不是这局的玩家而拒绝走棋），但让棋子能被选中、格子亮起来，
+      // 会给人"我好像能走"的错觉，点下去才发现不行——不如一开始就不响应。
+      setMessage("你正在观战这局对局，不能走棋。");
+      return;
+    }
     if (isBrowsingHistory()) {
       // 正在回看历史局面，不能在这里落子——先提示怎么回到当前局面
       setMessage("你正在回看历史局面，点右侧的 → 或 ⏭ 回到当前局面才能走棋。");
@@ -2216,10 +2255,16 @@
   const paramId = urlParams.get("id");
   const paramReplay = urlParams.get("replay");
   const paramSingle = urlParams.get("single") === "1";
+  const paramSpectate = urlParams.get("spectate") === "1";
 
   if (paramSingle) {
     singleMode = true;
     applySingleModeLayout();
+  }
+  // 必须在 loadGame() 之前设好——loadGame 里要靠它决定跳过认领座位
+  if (paramSpectate) {
+    spectateMode = true;
+    applySpectateModeLayout();
   }
 
   if (paramReplay) {
