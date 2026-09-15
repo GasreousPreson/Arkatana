@@ -1138,27 +1138,14 @@
       return;
     }
 
-    // 素材还没画好/还没加载完时的占位画法，避免棋盘一片空白
-    const r = CELL / 2 - 6;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = info.side === "black" ? COLORS.cinnabar : COLORS.jade;
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = COLORS.ink;
-    ctx.stroke();
-    if (info.promoted) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
-      ctx.strokeStyle = COLORS.gold;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-    ctx.fillStyle = COLORS.parchLight;
-    ctx.font = "bold 20px 'Microsoft YaHei', sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(info.symbol || "?", cx, cy + 1);
+    // 素材还没到位——这一格这一帧留空，不画任何东西。
+    //
+    // 以前这里会画一个"红/绿圆底 + 中文字"的占位棋子。去掉的原因：
+    // 那套占位跟正式造型长得完全不一样，加载完成的瞬间整盘棋会突然
+    // "换一套皮"，比空着半秒更突兀，也让人误以为网站本来就长这样。
+    // 现在 pieces.js 改成了普通造型优先加载 + 每到一张就回调重绘
+    // （见 pieces.js 的 onProgress），棋子是一枚枚浮现出来的，
+    // 空窗期很短，不需要占位也不会显得是坏了。
   }
 
 
@@ -1538,6 +1525,14 @@
     gameId = id;
     gameIdChip.textContent = "对局: " + id;
     if (socket) { socket.onclose = null; socket.close(); socket = null; }
+
+    // 复盘跟对局页不一样：整局棋谱就是这里的全部内容，没法像 loadGame 那样
+    // 先拿当前局面顶上。但至少先把棋盘本身（格子、坐标）画出来并说明在加载，
+    // 而不是让人对着一块空白画布等——长局的棋谱要解析几十个局面，
+    // 这段等待以前是完全没有反馈的。
+    boardState = {};
+    drawBoard();
+    setMessage(`正在加载对局 ${id} 的棋谱…`);
 
     try {
       await loadHistoryPositions(id);
@@ -2056,23 +2051,34 @@
     selected = null;
     legalDestinations = [];
 
-    // 先把整局的历史局面拉下来——有了它，一进对局就能立刻回看任意一步，
-    // 不用等到走了棋才慢慢攒出历史
+    // 2026-09 性能改版（针对"复盘/观战界面打开后棋盘加载太慢"）：
+    //
+    // 改版前这里是先 `await loadHistoryPositions(id)` 再去取当前局面——
+    // 也就是说，整局的历史棋盘（/games/{id}/replay，服务器要逐步把每一步
+    // 之后的完整局面都解析出来，一局几十步就是几十个棋盘）全部下载并解析
+    // 完成之前，**页面上一个棋子都不会出现**。局面越长等得越久，
+    // 观战和复盘恰恰是最容易点开长局的两个入口，所以感觉最明显。
+    //
+    // 现在顺序反过来：先取当前局面、立刻画出来、连上 WebSocket，让人马上
+    // 看到棋盘；历史局面改成后台加载，到位之前"回看上一步"这些按钮暂时
+    // 用不了（loadHistoryPositions 完成后会自动补上），但那是次要功能，
+    // 不该挡着主画面。
     positionHistory = [];
     moveMeta = [null];
     viewIndex = null;
-    try {
-      await loadHistoryPositions(id);
-    } catch (e) {
-      // 拉不到历史不影响正常下棋，applyState 会从当前局面重新开始攒
-      positionHistory = [];
-      moveMeta = [null];
-    }
 
     const state = await apiGet(`/games/${id}`);
     applyState(state);
     setMessage(`已加载对局 ${id}`);
     connectSocket(gameId);
+
+    // 后台补历史。不 await：拉不到或者拉得慢都不影响已经能看能下的主画面，
+    // applyState 本来就会从当前局面开始自己攒历史，最坏情况只是回看不到
+    // 进对局之前的那些步。
+    loadHistoryPositions(id).catch(() => {
+      positionHistory = [];
+      moveMeta = [null];
+    });
 
     // 观战模式（从首页观战区点进来，网址带 spectate=1）绝对不能尝试认领座位。
     // 实际上进行中的对局两个位置都满了，/join 会返回 409、被下面的 catch 吞掉，
@@ -2243,12 +2249,22 @@
 
   renderAuthStatus();
 
-  // 棋子素材预加载：加载完之后重绘一次，把首屏的占位圆牌换成正式造型。
-  // 素材还没画好的棋子会一直保持占位样式，不影响下棋。
+  // 棋子素材加载：不再是"等整批加载完再重绘一次"，而是每到一张就重绘，
+  // 棋子逐枚浮现（pieces.js 现在普通造型优先、升变造型延后到后台加载）。
+  // 重绘本身很便宜（一次 canvas 全盘绘制），但素材是一张接一张到的，
+  // 挨张重绘会在几百毫秒里触发几十次——用 requestAnimationFrame 合并，
+  // 同一帧内到达的多张素材只重绘一次。
   if (window.ArkatanaPieces) {
-    window.ArkatanaPieces.preloadAll().then(() => {
-      if (!anim) drawBoard();
+    let redrawQueued = false;
+    window.ArkatanaPieces.onProgress(() => {
+      if (redrawQueued) return;
+      redrawQueued = true;
+      requestAnimationFrame(() => {
+        redrawQueued = false;
+        if (!anim) drawBoard();   // 动画进行中不插队，动画自己每帧都在重绘
+      });
     });
+    window.ArkatanaPieces.preloadAll();
   }
 
   const urlParams = new URLSearchParams(window.location.search);

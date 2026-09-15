@@ -103,15 +103,42 @@
   }
 
   // ---------------------------------------------------------------
-  // 素材预加载：Canvas 必须等图片加载完才能画，
-  // 所以进对局前先把素材全部 load 一遍，避免棋盘一片空白。
-  // 缺失的素材不会阻塞流程，绘制时会自动退回占位画法。
+  // 素材预加载
+  //
+  // 2026-09 性能改版（针对"棋子图案显示得太慢"）：
+  //
+  // 改版前是一次性 Promise.all 把全部 50 张素材一起加载，全部完成之后
+  // 才回调重绘一次。两个问题：
+  //   1. 14 张"升变造型"占了总体积的一多半，可是**开局盘面上一枚升变棋子
+  //      都没有**——它们要等到有兵走到底线才用得上，却在首屏就跟普通造型
+  //      抢带宽、抢浏览器那六个并发连接位。
+  //   2. Promise.all 是"全有或全无"：哪怕 49 张早就到了，只要最后一张还在
+  //      路上，棋盘就一直维持在没有造型的状态。
+  //
+  // 现在改成两级 + 逐张回调：
+  //   第一级 essential：普通造型（开局盘面上真正会出现的那些）。
+  //   第二级 deferred ：升变造型，等第一级全部落地之后才开始下载，
+  //                     不跟首屏抢资源。
+  //   每加载完**一张**就通知一次调用方（notifyProgress），页面可以立刻把
+  //   这一枚棋子画出来，不必等整批——所以棋盘是逐渐"长"出来的，
+  //   而不是卡着不动然后突然全部出现。
   // ---------------------------------------------------------------
   const cache = {};
   let readyPromise = null;
+  const progressListeners = [];
 
-  function preloadAll() {
-    if (readyPromise) return readyPromise;
+  /** 注册"又有一张素材到位了"的回调。页面拿它触发重绘即可。 */
+  function onProgress(fn) {
+    if (typeof fn === "function") progressListeners.push(fn);
+  }
+
+  function notifyProgress() {
+    progressListeners.forEach((fn) => {
+      try { fn(); } catch (e) { /* 某个页面的重绘出错不该拖垮素材加载 */ }
+    });
+  }
+
+  function essentialPaths() {
     const paths = [];
     ["black", "white"].forEach((side) => {
       ["ares", "rook", "throne", "pawn"].forEach((p) => {
@@ -121,20 +148,61 @@
         paths.push(`${BASE}${side}_${p}_l.png`);
         paths.push(`${BASE}${side}_${p}_r.png`);
       });
-      // 升变造型：战车/剑士/炮塔左右两版 + 兵单一朝向
+    });
+    return paths;
+  }
+
+  function deferredPaths() {
+    const paths = [];
+    ["black", "white"].forEach((side) => {
       ["chariot", "swordsman", "turret"].forEach((p) => {
         paths.push(`${BASE}${side}_${p}_promoted_l.png`);
         paths.push(`${BASE}${side}_${p}_promoted_r.png`);
       });
       paths.push(`${BASE}${side}_pawn_promoted.png`);
     });
-    readyPromise = Promise.all(paths.map((path) => new Promise((resolve) => {
+    return paths;
+  }
+
+  function loadOne(path) {
+    return new Promise((resolve) => {
+      if (cache[path]) { resolve(); return; }
       const img = new Image();
-      img.onload = () => { cache[path] = img; resolve(); };
-      img.onerror = () => resolve();   // 素材还没画好很正常，不报错
+      img.onload = () => {
+        cache[path] = img;
+        notifyProgress();   // 每到一张就通知，页面可以马上把这枚棋子画上
+        resolve();
+      };
+      img.onerror = () => resolve();   // 素材缺失不阻塞整批
       img.src = path;
-    })));
+    });
+  }
+
+  function loadBatch(paths) {
+    return Promise.all(paths.map(loadOne));
+  }
+
+  /**
+   * 预加载全部素材。返回的 Promise 在**第一级（普通造型）**加载完就 resolve——
+   * 调用方等到的是"开局盘面能完整画出来"这个时刻，而不是"连升变造型都齐了"。
+   * 升变造型在后台继续下载，到位时同样会通过 onProgress 通知。
+   */
+  function preloadAll() {
+    if (readyPromise) return readyPromise;
+    readyPromise = loadBatch(essentialPaths()).then((result) => {
+      // 不 await 第二级：让它在后台慢慢下，不拖住首屏。
+      // 升变棋子真正出现在盘上通常是几十步之后的事，那时候早就下完了；
+      // 万一真的赶在下完之前就升变了，getImage 会返回 null，
+      // 调用方（learn.html 里那套按需补加载）会单独把这一张拉下来。
+      loadBatch(deferredPaths());
+      return result;
+    });
     return readyPromise;
+  }
+
+  /** 只等普通造型（等价于 preloadAll，保留成独立名字让意图更清楚） */
+  function preloadEssential() {
+    return preloadAll();
   }
 
   /** 取已加载好的素材；没有则返回 null（调用方退回占位画法） */
@@ -148,5 +216,6 @@
     return Object.keys(cache).length;
   }
 
-  global.ArkatanaPieces = { pieceImagePath, resolveVariant, pieceScale, preloadAll, getImage, loadedCount };
+  global.ArkatanaPieces = { pieceImagePath, resolveVariant, pieceScale, preloadAll,
+                            preloadEssential, onProgress, getImage, loadedCount };
 })(window);

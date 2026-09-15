@@ -549,6 +549,70 @@ def find_pending_room_for_user(username: str, session_factory=None) -> Optional[
         return record.game_id if record is not None else None
 
 
+def find_redundant_pending_rooms(max_age_seconds: int = 1800,
+                                  session_factory=None) -> list[str]:
+    """
+    找出大厅里该被清掉的"赘余房间"，返回它们的 game_id 列表。
+
+    两类赘余（一次查询里一起判，避免跑两遍库）：
+
+      1. 同一个创建者名下有多个还在等待的房间——只保留最新的那一个，
+         其余全部作废。以前只在"这个人又点了一次 Create a game"的时候
+         顺手清理，可是有很多路径绕得过去：多开一个标签页各建一局、
+         请求超时重试、bot 调度器重启后又建了一轮……每条路径都单独堵
+         堵不干净，不如在这里按结果统一收口。
+
+      2. 创建超过 max_age_seconds 还没人加入的房间——不管是谁建的。
+         这是给"建完就关掉浏览器/掉线"那种情况兜底：房主已经不在了，
+         房间却会一直挂在大厅里，别人点进去也等不到对手。
+         没有"房主是否在线"这种信号可用（没有心跳机制），所以用
+         "挂了多久还没人来"这个可观测的代理指标来判断。
+
+    判定"还在等待"的标准跟 list_open_rooms 完全一致（进行中 + 没走过棋 +
+    棋钟没开始 + 至少一方空着），保持两边永远看到同一批房间；否则会出现
+    "大厅里明明列着、清理逻辑却认为它不存在"这种对不上的情况。
+    """
+    factory = session_factory or SessionLocal
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    doomed: list[str] = []
+
+    with factory() as session:
+        records = session.execute(
+            select(GameRecord)
+            .where(
+                GameRecord.result == "ongoing",
+                GameRecord.move_count == 0,
+                GameRecord.clock_started.is_(False),
+                or_(GameRecord.black_player.is_(None), GameRecord.white_player.is_(None)),
+            )
+            .order_by(GameRecord.created_at.desc())
+        ).scalars().all()
+
+        seen_creators: set[str] = set()
+        for r in records:
+            created = r.created_at
+            # SQLite 存回来的 datetime 可能没带时区信息，补成 UTC 再比较，
+            # 否则 offset-naive 跟 offset-aware 相减会直接抛 TypeError
+            if created is not None and created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+
+            if created is not None and created < cutoff:
+                doomed.append(r.game_id)
+                continue
+
+            # 房主 = 已经落座的那一方（纯匿名房间两边都空，没有房主可言，
+            # 不参与去重——匿名房间只受上面的超时规则约束）
+            creator = r.black_player or r.white_player
+            if creator is None:
+                continue
+            if creator in seen_creators:
+                doomed.append(r.game_id)   # 已经见过更新的一个了，这个是旧的
+            else:
+                seen_creators.add(creator)
+
+    return doomed
+
+
 def _game_summary(r: "GameRecord") -> dict:
     """把一条 GameRecord 转成对局摘要字典——列表类接口共用同一份字段。"""
     return {

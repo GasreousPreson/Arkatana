@@ -1136,12 +1136,19 @@
 
   document.getElementById("btn-refresh-live").addEventListener("click", () => refreshLive(true));
 
-  // 棋子素材先预加载，加载完再重画一遍——素材没到位时小棋盘会用占位圆形
-  // 顶着，不至于空白，但拿到素材后要把它们换成真正的造型。
+  // 棋子素材：每加载好一张就重绘所有小棋盘（用 rAF 合并，避免几十次连续重绘）。
+  // 首页可能同时有 6 块小棋盘，所以合并尤其有必要。
   if (window.ArkatanaPieces) {
-    window.ArkatanaPieces.preloadAll().then(() => {
-      liveCards.forEach((entry) => entry.mini.redraw());
+    let redrawQueued = false;
+    window.ArkatanaPieces.onProgress(() => {
+      if (redrawQueued) return;
+      redrawQueued = true;
+      requestAnimationFrame(() => {
+        redrawQueued = false;
+        liveCards.forEach((entry) => entry.mini.redraw());
+      });
     });
+    window.ArkatanaPieces.preloadAll();
   }
 
   refreshLive(true).then(startLivePolling);

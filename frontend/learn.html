@@ -865,7 +865,15 @@
   window.__starImg.onload = () => drawBoard();
 
   if (window.ArkatanaPieces) {
-    window.ArkatanaPieces.preloadAll().then(() => drawBoard());
+    // 每到一张素材就重绘（rAF 合并），棋子逐枚浮现，
+    // 不再是"整批 50 张全部加载完才一次性出现"
+    let redrawQueued = false;
+    window.ArkatanaPieces.onProgress(() => {
+      if (redrawQueued) return;
+      redrawQueued = true;
+      requestAnimationFrame(() => { redrawQueued = false; drawBoard(); });
+    });
+    window.ArkatanaPieces.preloadAll();
   }
 
   if (!lesson_placeholder_guard()) {

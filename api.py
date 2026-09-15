@@ -1169,17 +1169,53 @@ async def _bot_scheduler_tick() -> None:
     )
 
 
+LOBBY_ROOM_MAX_AGE_SECONDS = 30 * 60   # 空房间挂这么久还没人加入就自动清掉。
+# 30 分钟是个折中：真人建完房去泡杯茶、等一等对手是很正常的，不能太短把
+# 正经等人的房间误杀；但也不能长到让掉线的人留下的空壳一直占着大厅。
+# bot 建的房间另有 5 分钟超时（在 ai/bot_controller.py 里），比这个严格得多，
+# 因为 bot 房间是源源不断自动生成的，留得久了会迅速淹没大厅。
+
+
+def _cleanup_lobby() -> None:
+    """清掉大厅里的赘余房间（重复创建的 + 建完就没人管的）。
+
+    同步函数、会碰数据库，所以调用方要用 run_in_threadpool 包一层，
+    不能直接在事件循环里跑。
+
+    注意这里必须走 _discard_game 而不是直接 db.delete_game：房间除了数据库
+    记录，在内存里还有 GAMES / GAME_PLAYERS / GAME_RATED 等好几张表的痕迹，
+    只删库不清内存的话，那局棋会变成"大厅里没有、但 /games/{id} 还能访问到"
+    的幽灵，观战列表（/live）也可能把它捞出来。
+    """
+    doomed = db.find_redundant_pending_rooms(max_age_seconds=LOBBY_ROOM_MAX_AGE_SECONDS)
+    for game_id in doomed:
+        # bot 调度器手里可能还记着这个房间（它有自己的一份待加入名单），
+        # 先通知它移除，免得调度器以为房间还在、迟迟不补建新的
+        bot_controller.mark_room_joined(BOT_SCHEDULER_STATE, game_id)
+        _discard_game(game_id)
+    if doomed:
+        print(f"[lobby_cleanup] 清理了 {len(doomed)} 个赘余房间: {', '.join(doomed)}")
+
+
 async def _bot_scheduler_loop() -> None:
     """服务启动时后台常驻跑的循环，每隔 BOT_SCHEDULER_INTERVAL_SECONDS 跑
     一次心跳。单次心跳出的任何异常都吞掉、打日志继续，不能让这个循环
     因为一次偶发错误就彻底停摆——不然网站会在悄无声息中失去所有 AI
     自主建房能力，比直接报错更难发现。
+
+    大厅清理也挂在这个循环里跑——它跟 bot 调度是同一类"每隔一会儿看一眼"
+    的后台维护工作，没必要再起一条循环。两者各自 try/except，一边出错
+    不影响另一边。
     """
     while True:
         try:
             await _bot_scheduler_tick()
         except Exception as e:
             print(f"[bot_scheduler] 心跳出错，跳过这一轮: {e}")
+        try:
+            await run_in_threadpool(_cleanup_lobby)
+        except Exception as e:
+            print(f"[lobby_cleanup] 清理出错，跳过这一轮: {e}")
         await asyncio.sleep(BOT_SCHEDULER_INTERVAL_SECONDS)
 
 

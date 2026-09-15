@@ -139,24 +139,10 @@
         const scale = global.ArkatanaPieces.pieceScale(notation);
         const size = cellSize * scale;
         ctx.drawImage(img, cx - size / 2, cy - size / 2, size, size);
-        return;
       }
-
-      // 素材没加载好时的占位画法：一个圆 + 记谱字母。小棋盘上素材还在加载
-      // 的那一两帧不至于是一片空白。
-      const r = cellSize * 0.36;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.fillStyle = info.side === "black" ? "#2b2b30" : "#f2ead6";
-      ctx.fill();
-      ctx.strokeStyle = "rgba(27,27,30,0.55)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.fillStyle = info.side === "black" ? "#f2ead6" : "#2b2b30";
-      ctx.font = `bold ${Math.round(cellSize * 0.34)}px Consolas, monospace`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(notation || "P", cx, cy);
+      // 素材还没到位就这一帧留空——理由同 game.html 里那处：
+      // 占位造型跟正式造型差太远，加载完成时整盘突然换皮比短暂空着更难看。
+      // pieces.js 每加载好一张就会回调重绘，棋子是逐枚浮现的。
     }
 
     /* -------------------------------------------------------------
