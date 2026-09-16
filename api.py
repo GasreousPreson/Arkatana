@@ -124,7 +124,41 @@ db.init_db()
 # 托管前端静态文件：frontend/ 文件夹里的 index.html 等文件，
 # 通过 http://127.0.0.1:8000/app/ 访问。
 # 这样前端和后端同源，浏览器里 fetch('/games') 不会有跨域问题。
-app.mount("/app", StaticFiles(directory="frontend", html=True), name="frontend")
+class CachedStaticFiles(StaticFiles):
+    """给静态资源补上 Cache-Control。
+
+    Starlette 自带的 StaticFiles 只发 ETag 和 Last-Modified，**不发
+    Cache-Control**。后果是浏览器虽然不会重复下载内容（拿到 304），
+    但每次页面跳转都要对每个文件发一次条件请求去问"变了没"。
+    棋子素材有 50 张，加上 HTML/JS 就是 55 次往返；浏览器每个域名只有
+    6 个并发，等于约 9 轮往返，全部打在一台单核服务器上——这才是
+    "learn 关卡界面打开很慢"的主要原因（那个页面自己的 JS 只有 51KB，
+    根本不重，重的是请求次数）。
+
+    分两档：
+      - 图片/音频/字体：内容一旦确定就不会再改，给一年 + immutable，
+        浏览器直接从本地取，连问都不问。要换素材时**必须同时改
+        pieces.js 里的 ASSET_VERSION**，靠 URL 上的版本号让浏览器认为
+        这是个新文件——否则老访客一年内都看不到新素材。
+      - HTML/JS/CSS：用 no-cache。注意 no-cache 不是"不缓存"，是"每次
+        都要回来问一下"，变了才重新下载。这样部署新版本立刻生效，
+        代价只是几次很轻的 304，不会有"改了代码但用户还跑着旧版"的问题。
+    """
+
+    IMMUTABLE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+                           ".mp3", ".wav", ".ogg", ".woff", ".woff2", ".ttf")
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        path = str(full_path).lower()
+        if path.endswith(self.IMMUTABLE_SUFFIXES):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/app", CachedStaticFiles(directory="frontend", html=True), name="frontend")
 
 # 内存对局存储：{game_id: Game 实例}
 GAMES: dict[str, Game] = {}
@@ -464,7 +498,64 @@ async def _apply_bot_move_and_broadcast(game_id: str, game: Game, move) -> bool:
     return True
 
 
+AI_LOOPS_RUNNING: set[str] = set()
+# 哪些对局当前已经有一个 trigger_ai_move 循环在跑。
+#
+# 为什么需要：trigger_ai_move 有 5 个调用点（建局 / 加入 / bot 撮合 / 走棋 …），
+# 而它自己内部是个 while 循环，bot vs bot 的时候会一路接力走到对局结束。
+# 之前没有任何保护，同一局完全可能被触发两次，于是**两个循环并发跑同一盘棋**，
+# 各自往线程池里丢一个 minimax 搜索。第二个循环最后通常会因为 make_move
+# 校验不过而退出——但那是在白白烧掉一整轮（最长 10 秒）搜索之后。
+# 在单核机器上这直接让降速从 2× 变成 3×，是"网站整体卡顿"的元凶之一。
+
+
+def _viewer_present(now: Optional[float] = None) -> bool:
+    """最近有没有人在看这个网站。
+
+    两个信号，满足任一即可：
+
+      1. 当前有任何一条活着的对局 WebSocket——有人开着某一局的页面
+         （下棋 / 观战）。这是个**状态**而不是时间戳，所以一个安静看棋
+         十分钟、期间什么请求都不发的观战者也能被正确算作"在场"，
+         不会因为超过时间窗口就被误判成走了。
+      2. 最近 VIEWER_PRESENCE_WINDOW_SECONDS 秒内有过首页观战区的 /live
+         轮询。首页开着就每 3 秒一次，窗口取得比轮询间隔宽得多，
+         是为了容忍网络抖动和切后台暂停轮询。
+    """
+    if any(conns for conns in manager.active.values()):
+        return True
+    now = now if now is not None else time.time()
+    return (now - LAST_VIEWER_ACTIVITY[0]) < VIEWER_PRESENCE_WINDOW_SECONDS
+
+
+def _mark_viewer_activity() -> None:
+    LAST_VIEWER_ACTIVITY[0] = time.time()
+
+
+LAST_VIEWER_ACTIVITY: list[float] = [0.0]   # 用单元素列表是为了能在函数里改写
+VIEWER_PRESENCE_WINDOW_SECONDS = 90
+
+
 async def trigger_ai_move(game_id: str) -> None:
+    """trigger_ai_move 的对外入口——只负责"同一局同时只允许一个循环在跑"这件事，
+    真正的走棋循环在 _trigger_ai_move_loop 里。
+
+    重复触发直接返回，不排队也不重试：已经在跑的那个循环本来就会一路接力
+    走到轮到真人或者对局结束为止，该走的棋一步都不会漏，再排一个只是浪费。
+    """
+    if game_id in AI_LOOPS_RUNNING:
+        return
+    AI_LOOPS_RUNNING.add(game_id)
+    try:
+        await _trigger_ai_move_loop(game_id)
+    finally:
+        # 必须 finally——循环里有十几个 return 分支，还可能抛异常，
+        # 漏掉任何一条路径都会让这个 game_id 永久留在集合里，
+        # 之后这局棋再也触发不了 AI，bot 就"不走棋"了。
+        AI_LOOPS_RUNNING.discard(game_id)
+
+
+async def _trigger_ai_move_loop(game_id: str) -> None:
     """
     后台任务：轮到 bot 走棋时调用——覆盖两条完全不同的来源：
         1. Play against AI（GAME_AI 记录的难度选择，不是人格）：AI 执黑
@@ -1160,8 +1251,23 @@ async def _bot_scheduler_tick() -> None:
 
     joined_game_id: Optional[str] = None
     if actions.join is not None:
-        room_game_id, joiner_key = actions.join
-        joined_game_id = await _join_bot_room(room_game_id, joiner_key)
+        # AI 互搏只在"最近有人在看"的时候才开新局。
+        #
+        # 这是单核服务器上最重要的一项节流：一局 AI 互搏约 60 步、每步最多
+        # 10 秒搜索，也就是连续十分钟把唯一的那颗核占满，而 GIL 会让同期
+        # 所有请求慢一倍。没人看的时候这十分钟纯属白烧。
+        #
+        # 注意这里门控的**只是"要不要再开一局"**，绝不打断已经在下的棋：
+        # 观众看到一半关掉页面，这盘棋照常下完（下完时 mark_game_ended 会
+        # 释放占用），只是不会再撮合下一盘，直到又有人来看。中途弃局会让
+        # 棋谱、评分结算、观战者的 WebSocket 全都处在不一致的半截状态，
+        # 省下的那点 CPU 完全不值得。
+        #
+        # 建房/关房的轮转不受这个门控影响——那几乎不花 CPU，而且大厅里
+        # 得一直有房间摆着，人来了才有东西可点。
+        if _viewer_present():
+            room_game_id, joiner_key = actions.join
+            joined_game_id = await _join_bot_room(room_game_id, joiner_key)
 
     bot_controller.apply_actions(
         BOT_SCHEDULER_STATE, actions, created, now=time.time(),
@@ -1567,6 +1673,12 @@ def get_live_games(limit: int = 6):
     去掉之后单局载荷小了一个数量级，轮询才不会变成带宽负担。
     """
     limit = max(1, min(limit, 24))
+
+    # 有人在轮询观战区 = 有人在看网站。这是"要不要再开一局 AI 互搏"的
+    # 主要依据（见 _viewer_present / _bot_scheduler_tick）。首页开着就每 3 秒
+    # 打一次这个接口，信号很灵敏。
+    _mark_viewer_activity()
+
     candidates = []
 
     for game_id in list(GAMES.keys()):
@@ -1720,9 +1832,31 @@ def get_replay(game_id: str):
 
     try:
         steps = db.replay_steps(game_id)
+        initial_board = board_to_json(setup_initial_board())
+
+        # 2026-09 体积改版：以前每一步都带一整个棋盘的 JSON，一局60步就是
+        # 250 KB——可是相邻两步之间实测**平均只差 2 个格子**（走子的起点变空、
+        # 终点换成这枚棋子；吃子、升变、隔山打牛也都落在这 2 格里）。
+        # 改成只发"这一步哪些格子变了"，实测 250 KB -> 5.3 KB，小 47 倍。
+        #
+        # diff 是在服务端**直接比较前后两个棋盘**算出来的，不是按走法规则
+        # 推导的——这一点很关键：这样不管规则多特殊（弩车/炮塔的隔山打牛、
+        # 升变、以后可能加的任何新规则），diff 都天然正确，前端也完全不需要
+        # 重新实现一遍走子规则去还原棋盘，照着改就行。
+        #
+        # diff 的格式：{格子坐标: 棋子对象}，值为 null 表示这一格变空了。
         result = []
+        prev_board_json = initial_board
         for step in steps:
             board, _ = position_string_to_board(step["position"])
+            board_json = board_to_json(board)
+
+            diff = {}
+            for sq in set(prev_board_json) | set(board_json):
+                if prev_board_json.get(sq) != board_json.get(sq):
+                    diff[sq] = board_json.get(sq)   # 不存在就是 None = 这格变空
+            prev_board_json = board_json
+
             result.append({
                 "move_number": step["move_number"],
                 "side": step["side"],
@@ -1730,11 +1864,8 @@ def get_replay(game_id: str):
                 "from_sq": step.get("from_sq"),
                 "to_sq": step.get("to_sq"),
                 "in_check": step.get("in_check", False),
-                "board": board_to_json(board),
+                "diff": diff,
             })
-        # 第0步（还没走任何棋）的初始局面也要给前端——
-        # 浏览历史时"回到最开始"需要它，光有每步之后的局面是不够的
-        initial_board = board_to_json(setup_initial_board())
     except Exception as e:
         # 常见原因：这局对局是用旧版记谱格式存的，现在的解析器读不懂了
         # （记谱格式在开发过程中调整过，早期存的数据可能跟当前版本不兼容）
@@ -1742,7 +1873,11 @@ def get_replay(game_id: str):
             status_code=422,
             detail=f"这局对局的棋谱回放失败，可能是用旧格式存储的历史数据: {type(e).__name__}: {e}",
         )
-    return {"game_id": game_id, "initial_board": initial_board, "steps": result}
+    # format 字段是给前端用的版本标记：老版本的响应每步带完整 board，
+    # 新版本带 diff。前端照着它决定怎么还原棋盘，这样万一有人开着旧页面
+    # （或者某个缓存住的旧 JS）也能给出明确的报错，而不是默默画出空棋盘。
+    return {"game_id": game_id, "format": "diff-v1",
+            "initial_board": initial_board, "steps": result}
 
 
 # ---------------------------------------------------------------------------
@@ -1755,6 +1890,11 @@ async def game_socket(websocket: WebSocket, game_id: str):
     连接后立即推送一次当前对局状态；之后每当有人走棋/悔棋/认输/加入，
     都会自动收到最新状态，不需要客户端主动发消息或轮询。
     """
+    # 有人开着某一局的页面（对局中 / 观战 / 复盘进来的实时局），同样算
+    # "有人在看网站"。只靠 /live 轮询不够：直接从链接点进某一局来观战、
+    # 一直没回首页的人，不会产生任何 /live 请求，但他确实在看。
+    _mark_viewer_activity()
+
     try:
         game = get_game_or_404(game_id)
     except HTTPException:

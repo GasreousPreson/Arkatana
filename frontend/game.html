@@ -1506,8 +1506,32 @@
     const data = await apiGet(`/games/${id}/replay`);
     positionHistory = [data.initial_board || {}];
     moveMeta = [null];   // 下标与 positionHistory 对齐，第0项占位
+
+    // 服务端现在只发"每一步哪些格子变了"（diff），不再每步都发一整个棋盘——
+    // 一局60步的响应从 250 KB 降到约 5 KB。这里把 diff 逐步叠加回完整局面。
+    //
+    // 注意每一步都要基于**上一步的副本**再改，不能原地改同一个对象：
+    // positionHistory 里存的是每一步之后的局面快照，共用同一个对象的话
+    // 所有快照会变成同一个（最终）局面，回看历史就全错了。
+    const useDiff = data.format === "diff-v1";
+    let running = { ...(data.initial_board || {}) };
+
     (data.steps || []).forEach((step) => {
-      positionHistory.push(step.board);
+      if (useDiff) {
+        running = { ...running };
+        Object.entries(step.diff || {}).forEach(([sq, piece]) => {
+          if (piece === null || piece === undefined) {
+            delete running[sq];    // 这一格变空了（走子的起点、被吃掉的子）
+          } else {
+            running[sq] = piece;
+          }
+        });
+        positionHistory.push(running);
+      } else {
+        // 兼容老格式（每步带完整 board）。理论上不会走到这里——HTML/JS 现在
+        // 是 no-cache，部署后前后端会同步更新——但留着比默默画错棋盘强。
+        positionHistory.push(step.board || {});
+      }
       moveMeta.push({
         notation: step.notation,
         side: step.side,

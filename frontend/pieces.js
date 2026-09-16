@@ -27,6 +27,14 @@
   // "../frontend/pieces/" 才能找到素材，就是靠这个。
   const BASE = (global.ARKATANA_PIECES_BASE || "pieces/");
 
+  // 素材版本号。服务器给图片发的是 Cache-Control: immutable（一年内浏览器
+  // 连问都不问，直接用本地的），所以**换了棋子素材就必须把这个数字改掉**——
+  // URL 变了浏览器才会认为是个新文件去重新下载，否则老访客要等一年才能
+  // 看到新造型。加在查询串上而不是改文件名，是因为查询串也算进缓存键，
+  // 但不用真的去重命名磁盘上那 50 个文件。
+  const ASSET_VERSION = "20260915";
+  const VER = "?v=" + ASSET_VERSION;
+
   // 记谱字母 -> 素材名里的棋子名
   const PIECE_FILES = {
     "":   "pawn",
@@ -85,8 +93,8 @@
     const piece = PIECE_FILES[notation];
     if (piece === undefined) return null;
     const suffix = (promoted && PROMOTABLE.has(notation)) ? "_promoted" : "";
-    if (NO_VARIANT.has(notation)) return `${BASE}${side}_${piece}${suffix}.png`;
-    return `${BASE}${side}_${piece}${suffix}_${resolveVariant(square, flipped, stickyVariant)}.png`;
+    if (NO_VARIANT.has(notation)) return `${BASE}${side}_${piece}${suffix}.png${VER}`;
+    return `${BASE}${side}_${piece}${suffix}_${resolveVariant(square, flipped, stickyVariant)}.png${VER}`;
   }
 
   /**
@@ -142,11 +150,11 @@
     const paths = [];
     ["black", "white"].forEach((side) => {
       ["ares", "rook", "throne", "pawn"].forEach((p) => {
-        paths.push(`${BASE}${side}_${p}.png`);
+        paths.push(`${BASE}${side}_${p}.png${VER}`);
       });
       VARIANT_PIECES.forEach((p) => {
-        paths.push(`${BASE}${side}_${p}_l.png`);
-        paths.push(`${BASE}${side}_${p}_r.png`);
+        paths.push(`${BASE}${side}_${p}_l.png${VER}`);
+        paths.push(`${BASE}${side}_${p}_r.png${VER}`);
       });
     });
     return paths;
@@ -156,10 +164,10 @@
     const paths = [];
     ["black", "white"].forEach((side) => {
       ["chariot", "swordsman", "turret"].forEach((p) => {
-        paths.push(`${BASE}${side}_${p}_promoted_l.png`);
-        paths.push(`${BASE}${side}_${p}_promoted_r.png`);
+        paths.push(`${BASE}${side}_${p}_promoted_l.png${VER}`);
+        paths.push(`${BASE}${side}_${p}_promoted_r.png${VER}`);
       });
-      paths.push(`${BASE}${side}_pawn_promoted.png`);
+      paths.push(`${BASE}${side}_pawn_promoted.png${VER}`);
     });
     return paths;
   }
